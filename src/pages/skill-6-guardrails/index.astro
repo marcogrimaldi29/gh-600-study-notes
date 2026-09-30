@@ -1,0 +1,435 @@
+---
+import NoteLayout from '../../layouts/NoteLayout.astro';
+import Callout from '../../components/Callout.astro';
+import CodeBlock from '../../components/CodeBlock.astro';
+import Mermaid from '../../components/Mermaid.astro';
+import { href } from '../../lib/urls';
+
+const riskRouting = `
+flowchart LR
+  PLAN["Agent plan<br/>plan.json with risk rating"] --> ROUTE{"risk"}
+  ROUTE -->|"low"| AUTO["apply_auto<br/>runs after checks"]
+  ROUTE -->|"medium · high"| GATED["apply<br/>environment: approval-required"]
+  GATED --> APPROVER["Required reviewer<br/>approves or rejects"]
+`;
+
+const layered = `
+flowchart LR
+  PRE["Before the action<br/>permissions · tool allowlists · firewall"] --> DURING["During the action<br/>preToolUse hooks · required checks · push protection"]
+  DURING --> AFTER["After the action<br/>reviews · environments · audit log · artifacts"]
+`;
+
+const hitl = `
+flowchart LR
+  A["Agent opens PR<br/>with plan and risk level"] --> C["Checks validate"]
+  C --> O["CODEOWNERS<br/>auto-requested"]
+  O --> M{"Merge<br/>decision point"}
+  M --> D{"Deploy<br/>decision point"}
+  D --> P["Production<br/>environment approval"]
+`;
+
+const riskWorkflow = `name: agent-plan-apply
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      risk: \${{ steps.read.outputs.risk }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: plan
+          path: out
+      - id: read
+        run: echo "risk=$(jq -r .risk out/plan.json)" >> "$GITHUB_OUTPUT"
+
+  apply_auto:
+    needs: plan
+    if: needs.plan.outputs.risk == 'low'
+    runs-on: ubuntu-latest
+    steps:
+      - run: ./scripts/apply.sh out/plan.json
+
+  apply:
+    needs: plan
+    if: needs.plan.outputs.risk != 'low'
+    runs-on: ubuntu-latest
+    environment: approval-required     # pauses for a required reviewer
+    steps:
+      - run: ./scripts/apply.sh out/plan.json`;
+
+const codeowners = `# CODEOWNERS — only enforced when "Require review from Code Owners" is on
+*                                     @org/core-team
+/security/                            @org/security-team
+/infra/                               @org/platform-team
+/.github/workflows/                   @org/platform-team
+/.github/agents/                      @org/ai-governance
+/.github/hooks/                       @org/ai-governance
+/.github/copilot-instructions.md      @org/ai-governance
+/.github/workflows/copilot-setup-steps.yml  @org/ai-governance`;
+
+const hooksJson = `{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      {
+        "type": "command",
+        "bash": "./.github/hooks/scripts/block-dangerous.sh",
+        "timeoutSec": 10
+      }
+    ],
+    "postToolUse": [
+      {
+        "type": "http",
+        "url": "https://audit.contoso.com/copilot",
+        "timeoutSec": 5
+      }
+    ]
+  }
+}`;
+
+const hookScript = `#!/bin/bash
+# Reads the preToolUse payload on stdin and denies destructive shell commands.
+input=$(cat)
+tool=$(jq -r '.toolName' <<< "$input")
+args=$(jq -r '.toolArgs' <<< "$input")
+
+if [[ "$tool" == "bash" ]] && grep -Eq 'rm -rf /|git push --force|curl [^|]*\\| *(ba)?sh|sudo ' <<< "$args"; then
+  jq -cn --arg r "Blocked by policy: destructive or remote-execution command" \\
+    '{permissionDecision: "deny", permissionDecisionReason: $r}'
+  exit 0
+fi
+
+echo '{"permissionDecision": "allow"}'`;
+
+const leastPrivilege = `permissions:
+  contents: read            # workflow default: read-only
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: npm run analyze
+
+  open_pr:
+    needs: analyze
+    runs-on: ubuntu-latest
+    permissions:            # elevated only for the job that writes
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+      - run: ./scripts/open-pr.sh`;
+
+const humanApproval = `name: agent-guardrails
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  require-human-approval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v9
+        with:
+          script: |
+            const { data: reviews } = await github.rest.pulls.listReviews({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.pull_request.number,
+            });
+            const human = reviews.some(r => r.state === 'APPROVED' && r.user?.type === 'User');
+            if (!human) core.setFailed('A human approval is required before merge.');`;
+
+const cliScoped = `# Read-only analysis: only git commands may run without a prompt
+copilot -p "Summarize the last 10 commits and flag breaking changes" -s \\
+  --allow-tool='shell(git:*)' --deny-tool='shell(git push)' --deny-tool=write`;
+
+const deployGate = `jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: production          # required reviewers · production-only secrets
+    concurrency:
+      group: production         # serialize production deploys
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: \${{ github.sha }}  # deploy an explicit commit, not "latest"
+      - run: ./deploy.sh`;
+---
+
+<NoteLayout
+  slug="skill-6-guardrails"
+  description="GH-600 Skill 6 (10–15%): classifying agent actions by operational, security and compliance risk, assigning autonomy levels, identifying actions that need human judgement, blocking policy violations with rulesets and hooks, least-privilege permissions, controlled paths for irreversible changes, and approvals that preserve velocity."
+  intro="The governance quarter of the exam. Classify each action by risk, give it the least autonomy that still keeps delivery fast, and enforce the boundary with controls the platform guarantees — rulesets, CODEOWNERS, environments, permissions and hooks — while keeping humans only where their judgement changes the outcome."
+>
+  <div class="card">
+    <strong>Two objectives in this skill area:</strong>
+    <ul style="margin-bottom:0">
+      <li><a href="#autonomy-levels">6.1 Define autonomy levels</a> — classify actions by operational, security and compliance risk; assign autonomy that is fast and compliant</li>
+      <li><a href="#guardrails-hitl">6.2 Implement guardrails and human-in-the-loop workflows</a> — actions needing judgement, blocking violations, least privilege, controlled paths for irreversible changes, preserving velocity</li>
+    </ul>
+  </div>
+
+  <!-- ================================================================= -->
+  <h2 id="autonomy-levels"><span class="num">6.1</span> Define autonomy levels</h2>
+
+  <h3 id="classify-risk">Classify agent actions by risk</h3>
+  <p>
+    <strong>Risk-based autonomy</strong> means an agent may act within boundaries that match the impact and
+    reversibility of what it is doing. Risk is not only a property of the action; it depends on
+    <strong>where</strong> the change lands, <strong>how easily it can be reversed</strong>, and <strong>how quickly it
+    reaches users or systems</strong>. Classify along three lenses:
+  </p>
+  <div class="table-wrap">
+    <table class="tbl t-red">
+      <thead><tr><th>Lens</th><th>Ask</th><th>Raises the risk</th></tr></thead>
+      <tbody>
+        <tr><td>Operational</td><td>What breaks if this is wrong, and how fast can we undo it?</td><td>Production deploys, infrastructure, database migrations, workflow changes</td></tr>
+        <tr><td>Security</td><td>What could this expose or grant?</td><td>Secrets, permissions, authentication code, new dependencies, network egress, MCP servers with write tools</td></tr>
+        <tr><td>Compliance</td><td>Does this touch regulated data or a controlled process?</td><td>PII, audit evidence, licence changes, change-management records, retention</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="table-wrap">
+    <table class="tbl t-red">
+      <thead><tr><th>Risk level</th><th>Example actions</th><th>Recommended control</th></tr></thead>
+      <tbody>
+        <tr><td>Low</td><td>Docs, formatting, comments, test additions</td><td>Full automation after checks (auto-merge)</td></tr>
+        <tr><td>Medium</td><td>Dependency updates, safe refactors, feature code</td><td>PR + required checks + at least one review</td></tr>
+        <tr><td>High</td><td>Infrastructure, workflows, auth, agent configuration</td><td>CODEOWNERS + explicit approvals + stronger checks</td></tr>
+        <tr><td>Critical</td><td>Production deploy, production secret access, permission changes</td><td>Environment gate + named reviewers + audit evidence required</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <Callout type="warn" title="Small diff, big consequence">
+    <p>
+      Treat <code>.github/workflows/</code>, <code>infra/</code> and <code>security/</code> as high risk by default — and,
+      for agent systems, the agent configuration itself: <code>.github/agents/</code>, <code>.github/hooks/</code>,
+      <code>.github/copilot-instructions.md</code>, <code>copilot-setup-steps.yml</code> and MCP settings. A one-line change
+      there alters what every future agent run is told or allowed to do.
+    </p>
+  </Callout>
+
+  <h3 id="assign-autonomy">Assign autonomy levels</h3>
+  <div class="table-wrap">
+    <table class="tbl t-violet">
+      <thead><tr><th>Autonomy level</th><th>The agent may</th><th>Typical implementation</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Read-only</strong></td><td>Inspect, summarize, classify, recommend</td><td>Read and search tools only; read-only MCP; <code>contents: read</code></td></tr>
+        <tr><td><strong>Propose-only</strong></td><td>Create branches and PRs; never merge or deploy</td><td>Copilot cloud agent's default; rulesets requiring review</td></tr>
+        <tr><td><strong>Execute with guardrails</strong></td><td>Run pre-approved workflows: tests, builds, staging deploys</td><td>Allowed workflows; auto-approved workflow runs where safe; staging environment without reviewers</td></tr>
+        <tr><td><strong>Human-authorized execution</strong></td><td>High-impact actions only after a person approves</td><td>Environment required reviewers; plan-first; CODEOWNERS</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    Autonomy is never one setting — it is the combination of PR rules, environments, workflow permissions and tool
+    access. And it should be <strong>routed by a machine-readable signal</strong>, not by someone reading a narrative:
+  </p>
+  <Mermaid code={riskRouting} caption="Risk-based routing: a low-risk plan applies automatically; anything else waits for an approver on a protected environment." />
+  <CodeBlock code={riskWorkflow} lang="yaml" />
+
+  <h3 id="progressive-autonomy">Grow autonomy progressively</h3>
+  <ol class="steps" style="--accent:var(--s6)">
+    <li>The agent can only open PRs; it cannot merge.</li>
+    <li>It may auto-merge low-risk PRs once checks pass.</li>
+    <li>It may deploy to staging automatically.</li>
+    <li>It reaches production only through an environment approval.</li>
+  </ol>
+  <p>
+    Each step is earned with evidence from the previous one. The same logic applies to issue triage automations, whose
+    <strong>automation level</strong> ranges from <em>Full control</em> (every change held for review) through
+    <em>Cautious</em> (the default: only high-confidence changes apply) and <em>Balanced</em> to <em>Full automation</em>.
+  </p>
+
+  <h3 id="rai-alignment">Stay compliant with security and Responsible AI standards</h3>
+  <p>
+    Organizational security standards and Responsible AI principles meet in the same practical controls: people remain
+    <strong>accountable</strong> for what agents do (co-authored commits, requesters cannot self-approve);
+    work stays <strong>transparent</strong> (session logs, plans, audit events); humans keep
+    <strong>oversight</strong> of consequential decisions (reviews, environments); and exposure is
+    <strong>minimized</strong> (least privilege, firewall, secrets kept out of the agent's reach). An autonomy level that
+    cannot be audited is not compliant, however fast it is.
+  </p>
+
+  <!-- ================================================================= -->
+  <h2 id="guardrails-hitl"><span class="num">6.2</span> Implement guardrails and human-in-the-loop workflows</h2>
+
+  <h3 id="human-judgement">Identify the actions that require human judgement</h3>
+  <p>Put people at <strong>decision points</strong>, not at every step:</p>
+  <ul>
+    <li><strong>Merging</strong> into a protected branch.</li>
+    <li><strong>Deploying</strong> to production, or any irreversible data operation.</li>
+    <li><strong>Accessing secrets</strong> or changing permissions and tokens.</li>
+    <li><strong>Changing workflows, agent configuration or security settings.</strong></li>
+    <li>Accepting a <strong>security exception</strong>, a licence change or anything with legal weight.</li>
+    <li>Choosing between <strong>conflicting agent outputs</strong>, or resolving ambiguity the task did not settle.</li>
+  </ul>
+  <Mermaid code={hitl} caption="Human-in-the-loop at the decision points: automation handles analysis and validation; people decide merge and deploy." />
+
+  <h3 id="block-violations">Block actions that violate policy</h3>
+  <p>
+    Blocking must be <strong>enforced by the platform</strong>. "Controls in docs only" is an anti-pattern: if the
+    platform cannot enforce it, it will eventually be bypassed. Layer the controls so each catches what the previous
+    one missed.
+  </p>
+  <Mermaid code={layered} caption="Layered enforcement: constrain before the action, validate during it, and make it accountable after it." />
+  <div class="table-wrap">
+    <table class="tbl t-red">
+      <thead><tr><th>Control</th><th>Blocks</th></tr></thead>
+      <tbody>
+        <tr><td>Rulesets / branch protection</td><td>Direct pushes, force pushes, branch deletion, merges without a PR, required checks, required approvals, code-owner review, code scanning results</td></tr>
+        <tr><td>CODEOWNERS + "require review from Code Owners"</td><td>Changes to sensitive paths without the owning team's approval</td></tr>
+        <tr><td><code>preToolUse</code> hook</td><td>A specific tool call, deterministically, before it runs — returns <code>permissionDecision: "deny"</code> with a reason</td></tr>
+        <tr><td>Push protection</td><td>Supported secrets before they are committed</td></tr>
+        <tr><td>Agent firewall</td><td>Outbound network requests to hosts not on the allowlist</td></tr>
+        <tr><td>Copilot CLI <code>--deny-tool</code>; managed settings</td><td>Tool use on developer machines; <code>allow-all</code> modes when disabled by enterprise policy</td></tr>
+        <tr><td>MCP allowlists (<code>deniedMcpServers</code>)</td><td>Unapproved MCP servers in IDEs and CLI</td></tr>
+        <tr><td>Copilot policies</td><td>Cloud agent, third-party agents, automations or MCP per organization or enterprise — each managed separately</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <CodeBlock code={hooksJson} lang="json" label=".github/hooks/policy.json" />
+  <CodeBlock code={hookScript} lang="bash" label=".github/hooks/scripts/block-dangerous.sh" />
+
+  <Callout type="exam" title="How hooks fail">
+    <p>
+      A <code>preToolUse</code> <strong>command</strong> hook is <strong>fail-closed</strong>: exit code 2, a crash or any
+      other non-zero exit denies the tool call, even if its output says "allow". But <strong>timeouts are always
+      fail-open</strong> — a slow hook lets the call proceed. <strong>HTTP</strong> <code>preToolUse</code> hooks are
+      fail-open on network errors. If any hook returns "deny", the tool is blocked. Under cloud agent,
+      <code>"ask"</code> is treated as <code>"deny"</code> because no one is there to answer. Hook files must be on the
+      default branch to be used by cloud agent.
+    </p>
+  </Callout>
+
+  <p>
+    Some rules cannot be expressed as settings alone. A <strong>defence-in-depth guardrail workflow</strong>, made a
+    required check, can insist that at least one approval came from a human account rather than an automation identity:
+  </p>
+  <CodeBlock code={humanApproval} lang="yaml" />
+
+  <h3 id="least-privilege">Scope permissions and execution contexts for least privilege</h3>
+  <p>
+    Permissions are the true boundary of an agent's power — they decide what it can do regardless of its instructions
+    or intent. Broad tokens turn small mistakes into large incidents.
+  </p>
+  <CodeBlock code={leastPrivilege} lang="yaml" />
+  <div class="table-wrap">
+    <table class="tbl t-slate">
+      <thead><tr><th>Where</th><th>Least-privilege practice</th></tr></thead>
+      <tbody>
+        <tr><td>Workflow <code>GITHUB_TOKEN</code></td><td>Read-only default at the organization or enterprise level; <code>permissions</code> at workflow level; elevate per job; treat <code>pull-requests: write</code> as elevated</td></tr>
+        <tr><td><code>copilot-setup-steps.yml</code></td><td>Minimal <code>permissions</code> — the token is only for setup; Copilot gets its own session token</td></tr>
+        <tr><td>Cloud agent's GitHub access</td><td>Default GitHub MCP token is read-only and limited to the current repository; widen only deliberately, on the <code>/readonly</code> URL where possible</td></tr>
+        <tr><td>Secrets</td><td>Agents secrets only for what the agent needs; anything it must never see stays in Actions secrets (which it cannot read); production secrets only in the production environment; <code>COPILOT_MCP_</code> names reach MCP servers only</td></tr>
+        <tr><td>Tools</td><td>Explicit <code>tools</code> lists in agent profiles and MCP servers; read-only tools for planning and review agents</td></tr>
+        <tr><td>Copilot CLI</td><td>Specific <code>--allow-tool</code> patterns instead of <code>--allow-all</code>; <code>--secret-env-vars</code> to redact variables from shell and MCP environments</td></tr>
+        <tr><td>Runners</td><td>GitHub-hosted (fresh VM each time) or ephemeral self-hosted runners</td></tr>
+        <tr><td>Third-party actions</td><td>Minimize them and pin versions — by full commit SHA for untrusted sources</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <CodeBlock code={cliScoped} lang="bash" label="A low-risk CLI task with matching permissions" />
+
+  <h3 id="controlled-paths">Require explicit authorization for irreversible or compliance-sensitive changes</h3>
+  <p>GitHub builds several controlled paths into Copilot cloud agent, and you add the rest:</p>
+  <ul>
+    <li><strong>Only users with write access</strong> can trigger cloud agent; comments from others are never shown to it.</li>
+    <li>The agent <strong>pushes only to its own branch</strong>, and only through simple push operations — it cannot run <code>git push</code> or other Git commands directly.</li>
+    <li>Its PRs are <strong>drafts</strong>; it <strong>cannot mark them ready, approve or merge</strong> them.</li>
+    <li>The person who asked for the PR <strong>cannot approve it</strong>, preserving "required approvals".</li>
+    <li>When a PR is opened under Copilot's own app identity (not attributed to a person), <strong>one additional approval</strong> is required if the repository already requires at least one — on by default in rulesets, always on for branch protection.</li>
+    <li>Actions workflows <strong>do not run</strong> on its pushes until someone with write access clicks <strong>Approve and run workflows</strong> — disabling that is a repository-admin decision, and it can expose secrets to unreviewed code.</li>
+    <li>Hidden characters and HTML comments are <strong>filtered</strong> from issues and comments before they reach the agent, to reduce prompt injection.</li>
+  </ul>
+  <p>
+    For the change itself, use <strong>environments</strong> with required reviewers for deploys and secret access,
+    <strong>plan-first</strong> for irreversible work, and in GitHub Agentic Workflows, <strong>safe outputs</strong> so
+    the agent only proposes writes that a separate, gated job performs after threat detection.
+  </p>
+  <CodeBlock code={deployGate} lang="yaml" />
+  <CodeBlock code={codeowners} lang="text" label="CODEOWNERS" />
+
+  <h3 id="preserve-velocity">Preserve execution velocity</h3>
+  <p>
+    An approval is only worth its delay if it <strong>materially reduces risk</strong>. Approvals everywhere produce
+    governance fatigue and rubber-stamping — which is worse than no approval, because it looks like control.
+  </p>
+  <div class="table-wrap">
+    <table class="tbl t-green">
+      <thead><tr><th>Friction that does not reduce risk</th><th>Faster, equally safe alternative</th></tr></thead>
+      <tbody>
+        <tr><td>Manual approval of every docs or formatting PR</td><td>Auto-merge after required checks</td></tr>
+        <tr><td>Prompting for every read or search tool</td><td>Pre-approve read-only tools; gate edit and execute</td></tr>
+        <tr><td>Reviewers re-deriving context from the diff</td><td>Evidence-first PRs: plan, checks, artifacts, rollback note</td></tr>
+        <tr><td>Everyone reviews everything</td><td>CODEOWNERS routes each path to the people who know it</td></tr>
+        <tr><td>Huge agent PRs that take hours to review</td><td>Small, scoped tasks and PRs</td></tr>
+        <tr><td>Holding all triage changes for review</td><td>Automation level <em>Cautious</em> or <em>Balanced</em>: only low-confidence changes wait</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <Callout type="note" title="Approvals are not always security controls">
+    <p>
+      For automated issue triage, suggestions awaiting approval are a <strong>workflow convenience, not a security
+      boundary</strong>: an agent with permission to change issues could apply changes directly through the API. Control
+      what an automation <em>can</em> do with repository and agent permissions; use approvals to decide what it
+      <em>should</em> do.
+    </p>
+  </Callout>
+
+  <h3 id="continuous-governance">Keep governance working over time</h3>
+  <p>
+    Controls drift: checks get renamed or removed, review requirements are relaxed, CODEOWNERS goes stale, permissions
+    expand, secrets move to broader scopes. Treat governance as an operational responsibility with a cadence:
+  </p>
+  <div class="table-wrap">
+    <table class="tbl t-slate">
+      <thead><tr><th>Cadence</th><th>Review</th></tr></thead>
+      <tbody>
+        <tr><td>Weekly</td><td>Failed agent runs and common policy violations</td></tr>
+        <tr><td>Monthly</td><td>Workflow permissions and secret scopes</td></tr>
+        <tr><td>Quarterly</td><td>Rulesets, CODEOWNERS, environment reviewers, evidence retention</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="table-wrap">
+    <table class="tbl t-red">
+      <thead><tr><th>Anti-pattern</th><th>Why it fails</th><th>Mitigation</th></tr></thead>
+      <tbody>
+        <tr><td>Unbounded autonomy</td><td>Irreversible changes happen without oversight</td><td>Environments, required reviewers, rulesets</td></tr>
+        <tr><td>Excess permissions</td><td>A small mistake becomes a major incident</td><td>Least privilege, environment-scoped secrets, job-level permissions</td></tr>
+        <tr><td>Missing audit trail</td><td>You cannot prove what happened</td><td>Artifact uploads and evidence-first workflows — missing evidence is a failure</td></tr>
+        <tr><td>Bypass paths</td><td>Direct pushes or disabled checks skip policy</td><td>Rulesets that restrict pushes; tightly limited bypass lists</td></tr>
+        <tr><td>Rubber-stamping</td><td>Approvals become "click to unblock"</td><td>Better evidence, CODEOWNERS routing, smaller PRs</td></tr>
+        <tr><td>Ambiguous tasks</td><td>An agent executes a guess</td><td>If a task cannot be defined precisely — criteria, constraints, paths, validation — it should not run autonomously</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <Callout type="tip" title="Recovery belongs to governance too">
+    <p>
+      Retry only transient failures, escalate after repeated ones, roll back with small PRs and explicit refs, and
+      <strong>investigate security failures instead of retrying them</strong>. The file-level syntax for every control on
+      this page is collected in the <a href={href('config-reference')}>Configuration reference</a>.
+    </p>
+  </Callout>
+</NoteLayout>

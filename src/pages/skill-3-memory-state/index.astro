@@ -1,0 +1,340 @@
+---
+import NoteLayout from '../../layouts/NoteLayout.astro';
+import Callout from '../../components/Callout.astro';
+import CodeBlock from '../../components/CodeBlock.astro';
+import Mermaid from '../../components/Mermaid.astro';
+import { href } from '../../lib/urls';
+
+const hierarchy = `
+flowchart TB
+  subgraph EXT["External memory — the source of truth"]
+    direction TB
+    subgraph LT["Long-term memory — curated, reusable"]
+      direction TB
+      ST["Short-term memory<br/>the current session's context window"]
+    end
+  end
+`;
+
+const resumeFlow = `
+flowchart LR
+  OPEN["Open the existing PR"] --> READ["Re-read description<br/>and linked issue"]
+  READ --> COMMITS["Check commits<br/>already pushed"]
+  COMMITS --> CHECKS["Check the Checks tab<br/>latest results"]
+  CHECKS --> CONTINUE["Continue from<br/>the latest state"]
+`;
+
+const driftLoop = `
+flowchart TB
+  SIG["Drift signal<br/>criteria unmet · decision contradicted · scope creep · checks failing"] --> ANCHOR["Re-anchor to the source of truth<br/>issue · PR description · instructions"]
+  ANCHOR --> COMPARE["Compare changes<br/>with acceptance criteria"]
+  COMPARE --> UPDATE["Update the PR description<br/>or steer the session"]
+  UPDATE --> RERUN["Push a fix and re-run checks"]
+`;
+
+const continuity = `
+flowchart LR
+  IDE["IDE agent mode"] --> PR
+  CLI["Copilot CLI"] --> PR
+  CCA["Copilot cloud agent"] --> PR
+  PR["Pull request #214<br/>branch · commits · checks · decisions"] --> ISSUE["Issue #198<br/>requirements · acceptance criteria"]
+`;
+
+const scopeCheck = `# .github/workflows/scope-check.yml — flags drift outside the agreed paths
+name: Scope check
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  scope:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Fail on files outside the allowed paths
+        run: |
+          allowed='^(src/|tests/|package(-lock)?\\.json$)'
+          outside=$(git diff --name-only "origin/\${{ github.base_ref }}...HEAD" | grep -Ev "$allowed" || true)
+          if [ -n "$outside" ]; then
+            echo "::error::Changes outside the agreed scope:"
+            echo "$outside"
+            exit 1
+          fi`;
+
+const pathInstructions = `---
+applyTo: "src/payments/**"
+excludeAgent: "code-review"
+---
+
+- Money is stored as integer cents; never use floating point.
+- Every change here needs a unit test in tests/payments/.
+- Decision record: docs/adr/0007-idempotency-keys.md is the source of truth for retries.`;
+
+const retention = `- name: Upload plan and evidence
+  uses: actions/upload-artifact@v7
+  with:
+    name: agent-evidence-\${{ github.sha }}
+    path: |
+      plan.json
+      reports/
+    retention-days: 30      # shorter than the repository default of 90`;
+
+const sdkResume = `// Copilot SDK. A session is only resumable if you give it your own ID —
+// otherwise the SDK generates a random one you cannot find again.
+await client.createSession({ sessionId: "alice-pr-214-review", model: "gpt-5.4" });
+
+// Later, from a new client instance or after a restart:
+const session = await client.resumeSession("alice-pr-214-review");
+await session.sendAndWait({ prompt: "Continue with step 3 of the plan." });
+
+// State lives in ~/.copilot/session-state/alice-pr-214-review/
+//   checkpoints/  conversation snapshots
+//   plan.md       the agent's planning state
+//   files/        artifacts the agent created`;
+---
+
+<NoteLayout
+  slug="skill-3-memory-state"
+  description="GH-600 Skill 3 (10–15%): short-term, long-term and external memory, Copilot Memory, scoping and sources of truth, expiration, pruning and reset rules, durable state in issues and pull requests, resuming work, detecting and correcting drift, and preventing conflicting and stale context across tools."
+  intro="The smallest skill area by weight, but the one that explains why long agent runs go wrong. Know where each kind of information should live, how Copilot remembers and forgets, how to resume from GitHub state instead of chat history, and how to spot and correct drift."
+>
+  <div class="card">
+    <strong>Three objectives in this skill area:</strong>
+    <ul style="margin-bottom:0">
+      <li><a href="#memory-strategies">3.1 Implement agent memory strategies</a> — short-term, long-term and external memory; scoping; expiration, pruning and reset</li>
+      <li><a href="#state-drift">3.2 Persist agent state and manage context drift</a> — durable artifacts, resuming without repetition, detecting and correcting drift</li>
+      <li><a href="#continuity">3.3 Ensure continuity across tools and environments</a> — sharing state, preventing conflicting and stale context</li>
+    </ul>
+  </div>
+
+  <!-- ================================================================= -->
+  <h2 id="memory-strategies"><span class="num">3.1</span> Implement agent memory strategies</h2>
+
+  <h3 id="memory-hierarchy">Short-term, long-term and external memory</h3>
+  <p>
+    An agent should not rely on a single stream of context. Organize what it knows into three tiers, each with a
+    different lifetime and purpose.
+  </p>
+
+  <Mermaid code={hierarchy} caption="The memory hierarchy. The session's working context is the smallest and shortest-lived; long-term memory (instructions, skills, Copilot Memory) is curated and reused; external memory — issues, pull requests, docs and workflow artifacts — is the durable source of truth everything else defers to." />
+
+  <div class="table-wrap">
+    <table class="tbl t-teal">
+      <thead><tr><th>Tier</th><th>What it holds</th><th>Lifetime</th><th>GitHub examples</th></tr></thead>
+      <tbody>
+        <tr><td>Short-term</td><td>The current task's instructions, recent feedback, tool results, next steps</td><td>One session — lost, or compacted, when it ends</td><td>The context window of a cloud agent or CLI session</td></tr>
+        <tr><td>Long-term</td><td>Curated, reusable knowledge: conventions, key decisions, repeatable procedures</td><td>Across tasks and sessions</td><td>Custom instructions, <code>AGENTS.md</code>, skills, custom agent prompts, Copilot Memory</td></tr>
+        <tr><td>External</td><td>The durable record: requirements, plans, decisions, results</td><td>As long as the artifact exists</td><td>Issues, PR descriptions and comments, ADRs and docs, workflow runs and artifacts</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <Callout type="exam" title="External memory is the source of truth">
+    <p>
+      When short-term context and an issue disagree, the issue wins. Anything that must survive the session — acceptance
+      criteria, an approved plan, a decision — belongs in an artifact the agent (and the next person) can re-read, not in
+      chat history.
+    </p>
+  </Callout>
+
+  <h3 id="choose-storage">Choose where each kind of information lives</h3>
+  <div class="table-wrap">
+    <table class="tbl t-violet">
+      <thead><tr><th>Information</th><th>Store it in</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td>Requirements and acceptance criteria</td><td>The issue</td><td>The agent can revisit the goal and validate against it</td></tr>
+        <tr><td>Plan and decisions</td><td>PR description or an ADR in <code>docs/</code></td><td>Keeps work consistent across sessions without re-interpretation</td></tr>
+        <tr><td>Conventions and validation rules</td><td>Repository custom instructions</td><td>Applied automatically to every task</td></tr>
+        <tr><td>Rules for part of the codebase</td><td>Path-specific instructions with <code>applyTo</code>, or a nested <code>AGENTS.md</code></td><td>Only loaded where relevant</td></tr>
+        <tr><td>Repeatable procedures</td><td>Agent skills (<code>SKILL.md</code> plus scripts)</td><td>Loaded on demand, not on every request</td></tr>
+        <tr><td>Execution results</td><td>Workflow logs and uploaded artifacts</td><td>Durable, linkable evidence</td></tr>
+        <tr><td>Facts the agent works out for itself</td><td>Copilot Memory</td><td>Learned over time; validated before use</td></tr>
+        <tr><td>Credentials</td><td>Agents secrets — never memory, instructions or prompts</td><td>Secrets are masked and scoped; memory is not a vault</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="copilot-memory">Copilot Memory</h3>
+  <p>
+    Copilot Memory (public preview) lets Copilot build its own understanding of a repository and of your preferences,
+    instead of making you restate them or maintain ever-growing instruction files. It is used by <strong>Copilot cloud
+    agent, Copilot code review, Copilot CLI and agentic autofix</strong>, and a fact learned by one can be used by
+    another.
+  </p>
+  <div class="table-wrap">
+    <table class="tbl t-teal">
+      <thead><tr><th></th><th>Repository-level facts</th><th>User-level preferences</th></tr></thead>
+      <tbody>
+        <tr><td>Content</td><td>Coding conventions, architecture decisions, build commands, project rules</td><td>How a specific user likes to work with Copilot</td></tr>
+        <tr><td>Created by</td><td>Activity of users <strong>with write access</strong> who have Memory enabled</td><td>That user's own interactions</td></tr>
+        <tr><td>Available to</td><td>Everyone with Memory access to that repository — and only in that repository</td><td>Only that user, across repositories</td></tr>
+        <tr><td>Stored with</td><td>Citations to the supporting code, <strong>checked against the current branch before use</strong></td><td>Citations that may include the user's own words</td></tr>
+        <tr><td>Managed by</td><td>Repository owners review and delete them (Settings → Copilot → Memory)</td><td>The user; on Business/Enterprise, admins can export (JSONL) or delete them</td></tr>
+        <tr><td>Used by code review?</td><td>Yes</td><td>No — code review applies repository facts only</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <ul>
+    <li><strong>Retention:</strong> any fact or preference that goes unused is deleted automatically after <strong>28 days</strong>; the timer can reset whenever Copilot successfully validates and uses the entry.</li>
+    <li><strong>Validation:</strong> only validated facts are used — a fact captured from a PR that was closed unmerged has no effect unless the current code still supports it.</li>
+    <li><strong>Enablement:</strong> per user, not per repository. On by default for individual plans; off by default for organization and enterprise plans until an administrator enables the policy, after which users are opted in and can opt out. With licences from several organizations, the most restrictive setting wins.</li>
+    <li><strong>Audit:</strong> exports, deletions and user opt-outs appear in the organization or enterprise audit log.</li>
+  </ul>
+
+  <Callout type="rename" title="Copilot Memory versus custom instructions">
+    <p>
+      Custom instructions are <strong>written by people</strong>, versioned in the repository and reviewed through pull
+      requests. Copilot Memory is <strong>learned by Copilot</strong>, stored by GitHub, validated against the code and
+      expires when unused. Put anything that must be authoritative or reviewed in instructions; let Memory capture the
+      incidental knowledge.
+    </p>
+  </Callout>
+
+  <h3 id="scope-memory">Scope memory to task-relevant information</h3>
+  <p>
+    Memory should contain only what affects the outcome: requirements and constraints, decisions that shape the
+    implementation, and how to validate it. Temporary intermediate steps and duplicated context should not be kept —
+    they crowd the context window and invite outdated information back in.
+  </p>
+  <ul>
+    <li>Use <strong>path-specific instructions</strong> so payment rules load only for payment code, and <code>excludeAgent</code> to keep a file away from code review or cloud agent.</li>
+    <li>Place <strong>nested <code>AGENTS.md</code></strong> files next to the code they describe — the nearest one in the directory tree takes precedence.</li>
+    <li>Prefer <strong>skills</strong> for long procedures: they load only when relevant, instead of occupying every request.</li>
+    <li>In Copilot CLI, very large tool outputs (over 20&nbsp;KiB by default) are saved to a file and only a preview enters the context.</li>
+  </ul>
+  <CodeBlock code={pathInstructions} lang="markdown" label=".github/instructions/payments.instructions.md" />
+
+  <h3 id="expiration-pruning-reset">Define memory expiration, pruning and reset rules</h3>
+  <div class="table-wrap">
+    <table class="tbl t-orange">
+      <thead><tr><th>Rule</th><th>Mechanism</th></tr></thead>
+      <tbody>
+        <tr><td>Expiration</td><td>Copilot Memory drops unused entries after 28 days. Actions logs and artifacts are retained <strong>90 days by default</strong>, configurable per repository, organization or enterprise (1–90 days for public repositories, up to 400 for private); <code>retention-days</code> shortens it per artifact.</td></tr>
+        <tr><td>Pruning</td><td>Delete stale artifacts and workflow runs from the Actions tab (deletion is permanent — and audited as <code>artifact.destroy</code>); delete wrong Memory facts; remove obsolete instruction files.</td></tr>
+        <tr><td>Summarization</td><td>Fold long histories into the PR description and link commits and runs instead of copying them. Copilot CLI compacts automatically at about 80% of the context window, or on demand with <code>/compact</code>.</td></tr>
+        <tr><td>Reset</td><td>When requirements change significantly, a new approach is chosen or assumptions are invalidated: rewrite the PR description, or close and recreate the PR; start a fresh CLI session with <code>/clear</code> or <code>/new</code>; delete the misleading memories.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <CodeBlock code={retention} lang="yaml" />
+
+  <!-- ================================================================= -->
+  <h2 id="state-drift"><span class="num">3.2</span> Persist agent state and manage context drift</h2>
+
+  <h3 id="durable-artifacts">Capture progress and decisions as durable artifacts</h3>
+  <p>
+    Memory tells an agent what matters; <strong>state</strong> records what has been done, what was decided and what
+    remains. In GitHub, state is not in one place — it is spread across artifacts that together act as persistent
+    memory:
+  </p>
+  <ul>
+    <li>The <strong>issue</strong> holds requirements and acceptance criteria.</li>
+    <li>The <strong>pull request</strong> is the state anchor: task description, link to the issue, current plan, progress updates and decisions — GitHub aggregates commits, checks and discussion there.</li>
+    <li><strong>Commits</strong> represent incremental progress.</li>
+    <li><strong>Workflow runs</strong> capture validation results on every push.</li>
+  </ul>
+  <p>
+    Copilot cloud agent keeps the PR title and body current as it iterates, and its commit messages link back to the
+    session log. Copilot CLI persists each session under <code>~/.copilot/session-state/</code> (checkpoints, a
+    <code>plan.md</code>, created files), which is what makes <code>--resume</code> and <code>--continue</code> work.
+  </p>
+
+  <h3 id="resume">Resume without repeating steps or diverging</h3>
+  <Mermaid code={resumeFlow} caption="Resuming from GitHub state: the agent (or a person) re-reads the record rather than re-deriving it." />
+  <div class="table-wrap">
+    <table class="tbl t-teal">
+      <thead><tr><th>Surface</th><th>How to resume</th></tr></thead>
+      <tbody>
+        <tr><td>Copilot cloud agent</td><td>Mention <code>@copilot</code> on the PR, or continue the session from the Agents page — it works on the same branch with the same context</td></tr>
+        <tr><td>Custom agents</td><td>A PR keeps using the agent profile version (commit SHA) it started with, so a later profile edit cannot change behaviour mid-PR</td></tr>
+        <tr><td>Copilot CLI</td><td><code>--continue</code> resumes the most recent session in the directory; <code>--resume</code> / <code>/resume</code> opens a picker or takes a session ID or name</td></tr>
+        <tr><td>Copilot SDK</td><td><code>resumeSession(sessionId)</code> — conversation, plan and artifacts are persisted; API keys and in-memory tool state are not</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <CodeBlock code={sdkResume} lang="typescript" label="Copilot SDK" />
+
+  <h3 id="detect-drift">Detect and correct drift</h3>
+  <p>
+    <strong>Context drift</strong> is when the agent's actions stop matching the original goal or earlier decisions —
+    common in long, multi-step runs. Watch for:
+  </p>
+  <ul>
+    <li>PR changes that do not satisfy the acceptance criteria.</li>
+    <li>Commits that contradict decisions recorded in the PR or ADRs.</li>
+    <li>Files changed outside the agreed scope.</li>
+    <li>Required checks failing or, worse, missing.</li>
+  </ul>
+  <Mermaid code={driftLoop} caption="Correcting drift means re-anchoring to the source of truth, not arguing with the agent's latest reasoning." />
+  <CodeBlock code={scopeCheck} lang="yaml" />
+
+  <Callout type="tip" title="Steer early">
+    <p>
+      On a running cloud agent session, a short follow-up prompt ("Use the existing ErrorHandler class instead of new
+      try/catch blocks") is applied after the current tool call — far cheaper than letting the session finish and
+      reworking the PR. In the CLI, rewind to the prompt where things went wrong rather than piling corrections on top.
+    </p>
+  </Callout>
+
+  <!-- ================================================================= -->
+  <h2 id="continuity"><span class="num">3.3</span> Ensure continuity of memory and state across tools and environments</h2>
+
+  <h3 id="share-state">Share agent state</h3>
+  <p>
+    Work often starts in an IDE, continues in the CLI and finishes in a cloud agent session. Share state through
+    <strong>durable references</strong> — issue and PR URLs, branch names, commit SHAs, workflow run links — that every
+    environment can resolve, not by copying context between chats.
+  </p>
+  <Mermaid code={continuity} caption="Every surface re-anchors to the same pull request and issue, so none of them needs another's session history." />
+  <ul>
+    <li><code>/delegate</code> (or an <code>&amp;</code> prefix) in Copilot CLI hands the task to cloud agent, committing local changes as a checkpoint on a new branch first.</li>
+    <li>Cloud agent sessions are shared with repository collaborators by default; local CLI and IDE sessions are private unless you share them, and synced sessions can be searched from Copilot Chat.</li>
+    <li>Copilot Memory is shared across cloud agent, code review and the CLI for the same repository.</li>
+  </ul>
+
+  <h3 id="conflicting-context">Prevent conflicting context</h3>
+  <p>
+    Conflicting context is the same information in several places with different values. Give each type of information
+    <strong>one source of truth</strong>, update the original instead of making copies, and never restate acceptance
+    criteria in prompts — link the issue.
+  </p>
+  <div class="table-wrap">
+    <table class="tbl t-slate">
+      <thead><tr><th>Where instructions can clash</th><th>How Copilot resolves it</th></tr></thead>
+      <tbody>
+        <tr><td>Personal, repository and organization instructions</td><td>All relevant sets are provided; personal has highest priority, then repository, then organization</td></tr>
+        <tr><td>Several <code>AGENTS.md</code> files</td><td>The nearest file in the directory tree takes precedence</td></tr>
+        <tr><td>Custom agents with the same name</td><td>Repository overrides organization, which overrides enterprise</td></tr>
+        <tr><td>MCP configuration at several levels</td><td>Out-of-the-box, then custom agent, then repository settings — later overrides earlier</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="stale-context">Prevent stale context</h3>
+  <p>Stale context is outdated information used as if it were current. Typical causes and fixes:</p>
+  <div class="table-wrap">
+    <table class="tbl t-orange">
+      <thead><tr><th>Cause</th><th>Prevention</th></tr></thead>
+      <tbody>
+        <tr><td>The PR branch is behind its base</td><td>Update the branch before continuing; a ruleset can require branches to be up to date before merge</td></tr>
+        <tr><td>Checks reflect an older commit</td><td>Re-run workflows after every push; read the latest run on the Checks tab</td></tr>
+        <tr><td>Requirements changed but the issue did not</td><td>Update the issue first, then point the agent at it</td></tr>
+        <tr><td>A remembered fact no longer holds</td><td>Copilot Memory validates citations against the current branch; delete wrong facts; unused ones expire in 28 days</td></tr>
+        <tr><td>A very long session</td><td>Compaction summarizes the history; start a fresh session for a new phase of work</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <Callout type="exam" title="Always re-anchor to GitHub">
+    <p>
+      The consistent answer to "the agent picked up where another tool left off and did the wrong thing" is to make it
+      read the current GitHub state — the issue, the PR, the latest commits and check results — rather than to transfer a
+      longer chat transcript. For evaluation signals built on that state, continue with
+      <a href={href('skill-4-evaluation-tuning')}>Skill 4</a>.
+    </p>
+  </Callout>
+</NoteLayout>

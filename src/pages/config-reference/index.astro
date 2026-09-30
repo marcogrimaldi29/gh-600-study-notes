@@ -1,0 +1,485 @@
+---
+import NoteLayout from '../../layouts/NoteLayout.astro';
+import Callout from '../../components/Callout.astro';
+import CodeBlock from '../../components/CodeBlock.astro';
+import Mermaid from '../../components/Mermaid.astro';
+import { href } from '../../lib/urls';
+
+const fileMap = `
+flowchart TB
+  subgraph REPO["Repository — versioned in Git"]
+    direction TB
+    subgraph DOTGH[".github/ — protect it with CODEOWNERS"]
+      direction LR
+      INSTR["copilot-instructions.md<br/>instructions/*.instructions.md"]
+      AGENTS["agents/*.agent.md"]
+      SKILLS["skills/NAME/SKILL.md"]
+      HOOKS["hooks/*.json"]
+      WF["workflows/copilot-setup-steps.yml<br/>workflows/*.md + *.lock.yml"]
+    end
+    ROOTF["AGENTS.md · CLAUDE.md · GEMINI.md · CODEOWNERS"]
+  end
+  subgraph SETTINGS["Repository settings — not in Git"]
+    direction LR
+    MCPS["Copilot → MCP servers<br/>JSON"]
+    NET["Copilot → Internet access<br/>firewall"]
+    SEC["Secrets and variables → Agents"]
+  end
+`;
+
+const agentProfile = `---
+name: test-specialist                  # optional; defaults to the file name
+description: Improves test coverage without changing production code   # REQUIRED
+target: github-copilot                 # vscode | github-copilot; omit for both
+tools: ["read", "search", "edit", "execute", "github/*"]   # omit or ["*"] = all; [] = none
+model: gpt-5.4                         # optional; inherits the default if unset
+disable-model-invocation: false        # true = never auto-selected (and not callable as a subagent)
+user-invocable: true                   # false = hidden from manual selection, programmatic only
+mcp-servers:                           # this agent only; ignored by IDE custom agents
+  coverage:
+    type: local
+    command: npx
+    args: ["coverage-mcp@latest"]
+    tools: ["get_report"]
+metadata:
+  owner: qa-platform
+---
+
+You are a testing specialist. Analyse coverage gaps and add unit and integration tests.
+Only change files under tests/. Never delete or skip an existing test.`;
+
+const repoInstructions = `# .github/copilot-instructions.md — repository-wide, applied to every request
+This is a Go service with a Ruby client.
+
+## Build and test
+- Build: make build
+- Test:  make test      (run before every commit)
+- Full CI check: make ci
+
+## Conventions
+- Run make fmt before committing.
+- Changes under proto/ require make proto.`;
+
+const pathSpecific = `---
+applyTo: "**/*.ts,**/*.tsx"
+excludeAgent: "code-review"      # or "cloud-agent"; omit to apply to both
+---
+
+Use strict TypeScript. Prefer named exports. Every component needs a test.`;
+
+const skillMd = `---
+name: github-actions-failure-debugging          # lowercase, hyphenated; matches the folder
+description: Debug failing GitHub Actions workflows. Use when asked to fix a failing CI run.
+allowed-tools: shell                            # optional pre-approval — trusted skills only
+---
+
+1. Use list_workflow_runs to find the failing run for the PR.
+2. Use summarize_job_log_failures to understand what failed.
+3. Reproduce the failure locally, fix it, and confirm before committing.`;
+
+const setupSteps = `jobs:
+  copilot-setup-steps:        # exact name required; file must be on the default branch
+    runs-on: ubuntu-latest    # larger, self-hosted (ARC) or Windows labels allowed
+    timeout-minutes: 30       # <= 59
+    permissions:
+      contents: read
+    services:                 # e.g. a database for integration tests
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: "npm"
+      - run: npm ci`;
+
+const mcpJson = `{
+  "mcpServers": {
+    "sentry": {
+      "type": "local",                                   // local | stdio | http | sse
+      "command": "npx",
+      "args": ["@sentry/mcp-server@latest"],
+      "tools": ["get_issue_details"],                     // REQUIRED — allowlist tools
+      "env": { "SENTRY_ACCESS_TOKEN": "$COPILOT_MCP_SENTRY_TOKEN" }
+    },
+    "cloudflare": {
+      "type": "sse",
+      "url": "https://docs.mcp.cloudflare.com/sse",
+      "tools": ["*"]
+    }
+  }
+}`;
+
+const cliMcp = `// ~/.copilot/mcp-config.json — Copilot CLI user configuration
+{
+  "mcpServers": {
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/readonly"
+    }
+  }
+}`;
+
+const hooksFile = `{
+  "version": 1,
+  "hooks": {
+    "sessionStart":        [{ "type": "command", "bash": "./scripts/log-start.sh", "timeoutSec": 10 }],
+    "userPromptSubmitted": [{ "type": "command", "bash": "./scripts/log-prompt.sh" }],
+    "preToolUse":          [{ "type": "command", "matcher": "bash", "bash": "./scripts/policy.sh", "timeoutSec": 15 }],
+    "postToolUse":         [{ "type": "http", "url": "https://audit.contoso.com/copilot" }],
+    "errorOccurred":       [{ "type": "command", "bash": "./scripts/alert.sh" }],
+    "sessionEnd":          [{ "type": "command", "bash": "./scripts/cleanup.sh", "timeoutSec": 60 }]
+  }
+}`;
+
+const denyOutput = `{"permissionDecision": "deny", "permissionDecisionReason": "Force pushes are not allowed"}`;
+
+const agenticWorkflow = `---
+on:
+  schedule: daily                 # any GitHub Actions trigger
+permissions:
+  contents: read                  # read-only unless you grant more
+  issues: read
+  pull-requests: read
+  copilot-requests: write         # bill Copilot usage to the organization via GITHUB_TOKEN
+engine: copilot                   # default; claude, codex and gemini also supported
+network: defaults                 # firewalled egress
+tools:
+  github:
+    toolsets: [default]
+safe-outputs:
+  create-issue:                   # the ONLY write this workflow may perform
+    title-prefix: "[repo-status] "
+    labels: [report]
+max-ai-credits: 300               # per-run cap (default 1,000 AIC)
+---
+
+# Daily repository status
+
+Summarize the last 24 hours of issues, pull requests and commits.
+Highlight blockers and recommend next steps. Keep it short and link everything.`;
+
+const ghaw = `gh extension install github/gh-aw     # install the extension
+gh aw init                               # add authoring skills, instructions and an agent
+gh aw compile                            # markdown -> hardened .lock.yml (commit both)
+gh aw run daily-status                   # run a workflow
+gh aw logs                               # recent runs: duration, tokens, AIC estimates
+gh aw audit 1234567890                   # inspect one run in detail`;
+
+const actionsBlocks = `on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read                              # least privilege by default
+
+concurrency:
+  group: \${{ github.workflow }}-\${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    if: github.event_name == 'pull_request'   # defensive gating: PR-only logic
+    runs-on: ubuntu-latest
+    outputs:
+      risk: \${{ steps.plan.outputs.risk }}    # job output = contract for later jobs
+    steps:
+      - id: plan
+        run: echo "risk=low" >> "$GITHUB_OUTPUT"   # step output
+
+  deploy:
+    needs: plan
+    if: needs.plan.outputs.risk == 'low'
+    runs-on: ubuntu-latest
+    environment: production                   # required reviewers, scoped secrets
+    env:
+      REGION: \${{ vars.DEPLOY_REGION }}       # vars.* = centrally managed configuration
+    steps:
+      - run: echo "Deploying to $REGION"`;
+
+const prTemplate = `<!-- .github/pull_request_template.md -->
+## Plan (required)
+- **Goal:**
+- **Scope (paths):**
+- **Steps:**
+- **Success criteria:** [ ] required checks pass  [ ] security signals reviewed
+- **Risks and mitigations:**
+- **Rollback / escalation:**
+
+## Evidence
+- Workflow run(s):
+- Scan results:
+
+## Decisions and handoffs
+- Decision / rationale / next owner:`;
+---
+
+<NoteLayout
+  slug="config-reference"
+  description="GH-600 configuration reference: custom agent profiles, custom instructions, agent skills, copilot-setup-steps.yml, repository and custom-agent MCP configuration, hooks, GitHub Agentic Workflows frontmatter, Copilot CLI flags and slash commands, and the GitHub Actions building blocks that gate agents."
+  intro="GH-600 shows you configuration files and asks what they do, what is missing or what is unsafe. This page collects the syntax of every file and flag the skill pages rely on, with the properties and defaults that questions tend to hinge on."
+>
+  <div class="card">
+    <strong>Jump to a file type:</strong>
+    <ul style="margin-bottom:0">
+      <li><a href="#file-map">Where everything lives</a></li>
+      <li><a href="#agent-profile">Custom agent profile</a> · <a href="#instructions">Custom instructions</a> · <a href="#skills">Agent skills</a></li>
+      <li><a href="#setup-steps">copilot-setup-steps.yml</a> · <a href="#mcp-config">MCP configuration</a> · <a href="#hooks">Hooks</a></li>
+      <li><a href="#agentic-workflows">GitHub Agentic Workflows</a> · <a href="#copilot-cli">Copilot CLI</a> · <a href="#actions-blocks">GitHub Actions building blocks</a></li>
+    </ul>
+  </div>
+
+  <!-- ================================================================= -->
+  <h2 id="file-map">Where everything lives</h2>
+  <Mermaid code={fileMap} caption="Customization lives in two places: versioned files in the repository, and settings that are not in Git." />
+  <div class="table-wrap">
+    <table class="tbl t-slate">
+      <thead><tr><th>File or setting</th><th>Location</th><th>Read by</th></tr></thead>
+      <tbody>
+        <tr><td>Repository instructions</td><td><code>.github/copilot-instructions.md</code></td><td>Chat, cloud agent, code review, CLI, IDEs</td></tr>
+        <tr><td>Path-specific instructions</td><td><code>.github/instructions/**/*.instructions.md</code></td><td>Cloud agent, code review, CLI, IDEs</td></tr>
+        <tr><td>Agent instructions</td><td><code>**/AGENTS.md</code> (nearest wins); root <code>CLAUDE.md</code> or <code>GEMINI.md</code></td><td>Cloud agent, CLI, IDEs; code review reads <code>AGENTS.md</code></td></tr>
+        <tr><td>Prompt files</td><td><code>.github/prompts/*.prompt.md</code></td><td>IDEs only</td></tr>
+        <tr><td>Custom agents</td><td><code>.github/agents/NAME.agent.md</code>; org/enterprise <code>agents/NAME.md</code> in <code>.github</code> or <code>.github-private</code></td><td>Cloud agent, Copilot app, CLI, IDEs</td></tr>
+        <tr><td>Skills</td><td><code>.github/skills/</code>, <code>.claude/skills/</code> or <code>.agents/skills/</code>; personal <code>~/.copilot/skills/</code></td><td>Cloud agent, code review, CLI, Copilot app, VS Code</td></tr>
+        <tr><td>Hooks</td><td><code>.github/hooks/*.json</code>; CLI also <code>~/.copilot/hooks/</code> and machine policy directories</td><td>Cloud agent, CLI (VS Code in preview)</td></tr>
+        <tr><td>Setup steps</td><td><code>.github/workflows/copilot-setup-steps.yml</code> (default branch)</td><td>Cloud agent; code review too, unless <code>copilot-code-review.yml</code> exists</td></tr>
+        <tr><td>Repository MCP servers</td><td>Settings → Copilot → MCP servers (JSON)</td><td>Cloud agent and code review</td></tr>
+        <tr><td>Firewall</td><td>Settings → Copilot → Internet access</td><td>Cloud agent and code review (configured separately)</td></tr>
+        <tr><td>Agent secrets</td><td>Settings → Secrets and variables → Agents</td><td>Cloud agent (<code>COPILOT_MCP_*</code> only to MCP servers)</td></tr>
+        <tr><td>Agentic workflows</td><td><code>.github/workflows/NAME.md</code> + compiled <code>NAME.lock.yml</code></td><td>GitHub Actions</td></tr>
+        <tr><td>Enterprise managed settings</td><td><code>managed-settings.json</code>, usually in <code>.github-private</code>, or deployed by MDM</td><td>Copilot clients (CLI, IDEs)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ================================================================= -->
+  <h2 id="agent-profile">Custom agent profile</h2>
+  <CodeBlock code={agentProfile} lang="markdown" label=".github/agents/test-specialist.agent.md" />
+  <div class="table-wrap">
+    <table class="tbl t-violet">
+      <thead><tr><th>Property</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>description</code></td><td>The only <strong>required</strong> property. Also what runtimes use to decide when to delegate — be specific.</td></tr>
+        <tr><td><code>name</code></td><td>Optional display name; the filename (minus <code>.md</code> / <code>.agent.md</code>) is the identifier. Filenames may use only <code>. - _ a-z A-Z 0-9</code>.</td></tr>
+        <tr><td><code>tools</code></td><td>Omitted or <code>["*"]</code> = all; <code>[]</code> = none; aliases <code>read</code>, <code>edit</code>, <code>search</code>, <code>execute</code>, <code>agent</code>, <code>web</code>, <code>todo</code>; MCP tools as <code>server/tool</code> or <code>server/*</code>; unknown names ignored.</td></tr>
+        <tr><td><code>target</code></td><td><code>vscode</code> or <code>github-copilot</code>; both when omitted.</td></tr>
+        <tr><td><code>model</code></td><td>Model override; inherits the default when unset.</td></tr>
+        <tr><td><code>disable-model-invocation</code></td><td><code>true</code> = must be selected manually; equivalent to the retired <code>infer: false</code> and takes precedence over it.</td></tr>
+        <tr><td><code>user-invocable</code></td><td><code>false</code> = cannot be selected manually; programmatic use only. Default <code>true</code>.</td></tr>
+        <tr><td><code>mcp-servers</code></td><td>MCP servers for this agent only. Supports <code>{'${{ secrets.X }}'}</code> and <code>{'${{ vars.X }}'}</code>. Not used by IDE custom agents.</td></tr>
+        <tr><td><code>metadata</code></td><td>Name/value annotations. Not used by IDE custom agents.</td></tr>
+        <tr><td>Body</td><td>The agent's prompt, up to <strong>30,000 characters</strong>.</td></tr>
+        <tr><td><code>handoffs</code>, <code>argument-hint</code></td><td>VS Code only — ignored by cloud agent on GitHub.com.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    Profiles are versioned by the commit SHA of the file; a PR keeps using the version that started it. On a name
+    clash, repository beats organization beats enterprise.
+  </p>
+
+  <!-- ================================================================= -->
+  <h2 id="instructions">Custom instructions</h2>
+  <CodeBlock code={repoInstructions} lang="markdown" />
+  <CodeBlock code={pathSpecific} lang="markdown" label=".github/instructions/typescript.instructions.md" />
+  <ul>
+    <li><code>applyTo</code> takes comma-separated globs; <code>"**"</code> applies everywhere.</li>
+    <li><code>excludeAgent: "code-review"</code> or <code>"cloud-agent"</code> keeps a file away from one agent.</li>
+    <li>Personal instructions take priority over repository ones, which take priority over organization ones — but all relevant sets are sent.</li>
+    <li>The first time Copilot opens a PR in a repository, it leaves a link to generate instructions automatically.</li>
+  </ul>
+
+  <!-- ================================================================= -->
+  <h2 id="skills">Agent skills</h2>
+  <CodeBlock code={skillMd} lang="markdown" label=".github/skills/github-actions-failure-debugging/SKILL.md" />
+  <ul>
+    <li>The file must be named <code>SKILL.md</code>, in its own lowercase, hyphenated folder; <code>name</code> and <code>description</code> are required, <code>license</code> optional.</li>
+    <li>Scripts and resources in the folder are made available when the skill is used; reference them from the instructions.</li>
+    <li><code>allowed-tools</code> pre-approves tools — pre-approve <code>shell</code> or <code>bash</code> only for skills you have reviewed and fully trust.</li>
+    <li><code>gh skill</code> in GitHub CLI can search, install, update and publish skills.</li>
+  </ul>
+
+  <!-- ================================================================= -->
+  <h2 id="setup-steps">copilot-setup-steps.yml</h2>
+  <CodeBlock code={setupSteps} lang="yaml" label=".github/workflows/copilot-setup-steps.yml" />
+  <div class="table-wrap">
+    <table class="tbl t-magenta">
+      <thead><tr><th>Rule</th><th>Detail</th></tr></thead>
+      <tbody>
+        <tr><td>Job name</td><td>Exactly <code>copilot-setup-steps</code>, or it is not picked up</td></tr>
+        <tr><td>Customizable keys</td><td><code>steps</code>, <code>permissions</code>, <code>runs-on</code>, <code>services</code>, <code>snapshot</code>, <code>timeout-minutes</code> (max 59) — everything else ignored</td></tr>
+        <tr><td>Branch</td><td>Must be on the default branch to take effect; it also runs as a normal workflow when changed, so you can test it</td></tr>
+        <tr><td>Failure</td><td>A failing step skips the remaining setup; Copilot starts anyway</td></tr>
+        <tr><td>Checkout</td><td><code>fetch-depth</code> is overridden; if you do not check out, Copilot does it after setup</td></tr>
+        <tr><td>Runners</td><td>Ubuntu x64 or Windows 64-bit only; self-hosted must be ephemeral and needs the integrated firewall disabled</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ================================================================= -->
+  <h2 id="mcp-config">MCP configuration</h2>
+  <h3 id="mcp-repo">Repository settings (cloud agent and code review)</h3>
+  <CodeBlock code={mcpJson} lang="jsonc" label="Settings → Copilot → MCP servers" />
+  <div class="table-wrap">
+    <table class="tbl t-magenta">
+      <thead><tr><th>Key</th><th>Applies to</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>type</code></td><td>All — required</td><td><code>local</code> / <code>stdio</code> (same thing), <code>http</code>, <code>sse</code></td></tr>
+        <tr><td><code>tools</code></td><td>All — required</td><td>Allowlist; prefer specific read-only tools, <code>["*"]</code> enables all</td></tr>
+        <tr><td><code>command</code>, <code>args</code></td><td>Local — required</td><td>How to start the server</td></tr>
+        <tr><td><code>env</code></td><td>Local</td><td>Literal values or <code>$COPILOT_MCP_*</code> references</td></tr>
+        <tr><td><code>url</code></td><td>Remote — required</td><td>Server endpoint; OAuth-only remote servers are not supported</td></tr>
+        <tr><td><code>headers</code></td><td>Remote</td><td>Literal values or <code>$COPILOT_MCP_*</code> references</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    Reusing a VS Code <code>mcp.json</code>? Add a <code>tools</code> key to each server and replace <code>inputs</code>
+    and <code>envFile</code> with <code>env</code>. Only <code>COPILOT_MCP_</code>-prefixed Agents secrets and variables
+    are available to MCP configuration.
+  </p>
+  <h3 id="mcp-cli">Copilot CLI</h3>
+  <CodeBlock code={cliMcp} lang="jsonc" />
+  <p>
+    <code>/mcp add</code> writes to <code>~/.copilot/mcp-config.json</code>; a repository <code>.mcp.json</code> adds
+    workspace servers; <code>--additional-mcp-config</code> adds servers for one session;
+    <code>--disable-builtin-mcps</code> turns off the built-in GitHub MCP server; <code>--add-github-mcp-toolset</code> and
+    <code>--enable-all-github-mcp-tools</code> widen it beyond the CLI's default subset.
+  </p>
+  <p>
+    For MCP allowlists in <code>managed-settings.json</code> and registry requirements, see
+    <a href={`${href('skill-2-tools-environments')}#mcp-allowlists`}>Skill 2</a>.
+  </p>
+
+  <!-- ================================================================= -->
+  <h2 id="hooks">Hooks</h2>
+  <CodeBlock code={hooksFile} lang="json" label=".github/hooks/agent-hooks.json" />
+  <div class="table-wrap">
+    <table class="tbl t-red">
+      <thead><tr><th>Event</th><th>Fires</th><th>Can change the outcome?</th></tr></thead>
+      <tbody>
+        <tr><td><code>sessionStart</code> / <code>sessionEnd</code></td><td>Session begins or resumes / ends</td><td>Start can inject context; end is notification</td></tr>
+        <tr><td><code>userPromptSubmitted</code></td><td>A prompt is submitted</td><td>Logging; prompt rewrite only for SDK hooks</td></tr>
+        <tr><td><code>preToolUse</code></td><td>Before every tool call</td><td><strong>Yes</strong> — allow, deny (with reason) or modify arguments</td></tr>
+        <tr><td><code>postToolUse</code></td><td>After a successful tool call</td><td>Can replace the result or add context</td></tr>
+        <tr><td><code>postToolUseFailure</code></td><td>After a failed tool call</td><td>Can add recovery guidance</td></tr>
+        <tr><td><code>agentStop</code> / <code>subagentStop</code></td><td>Main agent or a subagent finishes</td><td>Can block and force another turn (runaway guard after 8)</td></tr>
+        <tr><td><code>subagentStart</code></td><td>A subagent is spawned</td><td>Can add context, cannot block</td></tr>
+        <tr><td><code>errorOccurred</code></td><td>An error occurs</td><td>No — logging and alerts</td></tr>
+        <tr><td><code>permissionRequest</code>, <code>preCompact</code>, <code>notification</code></td><td>CLI permission flow, compaction, notifications</td><td>Permission can allow or deny; others informational</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <CodeBlock code={denyOutput} lang="json" label="preToolUse output that blocks a call" />
+  <div class="table-wrap">
+    <table class="tbl t-slate">
+      <thead><tr><th>Behaviour</th><th>Rule</th></tr></thead>
+      <tbody>
+        <tr><td>Format</td><td><code>"version": 1</code>; each event is an array; entries are <code>command</code> (<code>bash</code>, <code>powershell</code>, <code>command</code>, <code>cwd</code>, <code>env</code>, <code>timeoutSec</code>) or <code>http</code> (<code>url</code>, <code>headers</code>)</td></tr>
+        <tr><td>Default timeout</td><td>30 seconds (<code>timeoutSec</code>); keep hooks under ~5 seconds — they run synchronously and block the agent</td></tr>
+        <tr><td>Exit code 2</td><td>A warning for most events; a <strong>deny</strong> for <code>preToolUse</code> and <code>permissionRequest</code></td></tr>
+        <tr><td>Other non-zero exits</td><td>Logged and skipped (fail-open) — except <code>preToolUse</code> command hooks, which fail <strong>closed</strong></td></tr>
+        <tr><td>Timeouts</td><td>Always fail-open, even for <code>preToolUse</code> and policy hooks</td></tr>
+        <tr><td>Several hooks</td><td>Run in order; for <code>preToolUse</code> any "deny" blocks the tool</td></tr>
+        <tr><td>Cloud agent</td><td>Linux sandbox; only <code>bash</code> (or <code>command</code>) honoured; working directory <code>/workspace</code>; files discarded after the job (send logs via <code>http</code>); outbound calls need a firewall allow rule; <code>"ask"</code> = deny; <code>GITHUB_TOKEN</code> is not set</td></tr>
+        <tr><td>CLI only</td><td>Machine-wide policy hooks (<code>/etc/github-copilot/policy.d/</code>, <code>C:\ProgramData\GitHub\Copilot\policy.d\</code>) load first and cannot be disabled by users</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ================================================================= -->
+  <h2 id="agentic-workflows">GitHub Agentic Workflows</h2>
+  <CodeBlock code={agenticWorkflow} lang="markdown" label=".github/workflows/daily-status.md" />
+  <CodeBlock code={ghaw} lang="bash" label="GitHub CLI extension" />
+  <ul>
+    <li>The markdown body states intent; the frontmatter defines the boundaries. Both the <code>.md</code> and the compiled <code>.lock.yml</code> are committed to the default branch.</li>
+    <li>Guardrails: read-only permissions by default, writes only through validated <code>safe-outputs</code>, secrets kept out of the agent's runtime, threat detection on proposed outputs, firewalled containers, role-based control of who can trigger or edit.</li>
+    <li>Authentication: <code>GITHUB_TOKEN</code> with <code>copilot-requests: write</code> in organization repositories (the "Allow use of Copilot CLI billed to the organization" policy must be on), or a <code>COPILOT_GITHUB_TOKEN</code> fine-grained PAT for personal repositories.</li>
+    <li>Cost: Actions minutes plus inference, tracked as AI credits (1 AIC = $0.01); <code>max-ai-credits</code> caps a run (default 1,000).</li>
+  </ul>
+
+  <!-- ================================================================= -->
+  <h2 id="copilot-cli">Copilot CLI</h2>
+  <div class="table-wrap">
+    <table class="tbl t-blue">
+      <thead><tr><th>Option</th><th>Effect</th></tr></thead>
+      <tbody>
+        <tr><td><code>-p</code>, <code>--prompt</code></td><td>Run one prompt non-interactively and exit; anything not pre-approved is denied</td></tr>
+        <tr><td><code>-s</code></td><td>Silent — clean output for scripts</td></tr>
+        <tr><td><code>--no-ask-user</code></td><td>Disables the <code>ask_user</code> tool; the agent decides on its own</td></tr>
+        <tr><td><code>--allow-tool</code> / <code>--deny-tool</code></td><td>Pre-approve / forbid tools (deny wins); patterns such as <code>shell(git:*)</code>, <code>write(path)</code>, <code>Server(tool)</code></td></tr>
+        <tr><td><code>--available-tools</code> / <code>--excluded-tools</code></td><td>Restrict which tools the model can see</td></tr>
+        <tr><td><code>--allow-all-tools</code>, <code>--allow-all</code> / <code>--yolo</code></td><td>Grant everything (tools, paths, URLs) — sandboxes only; can be disabled by policy</td></tr>
+        <tr><td><code>--agent=NAME</code></td><td>Use a custom agent</td></tr>
+        <tr><td><code>--model</code></td><td>Pin the model for consistent automation</td></tr>
+        <tr><td><code>--plan</code>, <code>--autopilot</code></td><td>Start in plan mode; keep working until the task is complete</td></tr>
+        <tr><td><code>--max-autopilot-continues=N</code></td><td>Cap autopilot's automatic continuations — always set it in automation</td></tr>
+        <tr><td><code>--fleet</code></td><td>Run the prompt with parallel subagents</td></tr>
+        <tr><td><code>--continue</code>, <code>-r</code> / <code>--resume</code></td><td>Resume the latest session here, or pick one by ID or name</td></tr>
+        <tr><td><code>-w</code>, <code>--worktree</code></td><td>Run the session in its own Git worktree</td></tr>
+        <tr><td><code>--secret-env-vars</code></td><td>Redact variables from shell and MCP environments (<code>GITHUB_TOKEN</code> and <code>COPILOT_GITHUB_TOKEN</code> are redacted by default)</td></tr>
+        <tr><td><code>--share=FILE</code>, <code>--share-gist</code></td><td>Export the session transcript as evidence</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="table-wrap">
+    <table class="tbl t-blue">
+      <thead><tr><th>Slash command</th><th>Effect</th></tr></thead>
+      <tbody>
+        <tr><td><code>/plan</code> · <kbd>Shift</kbd>+<kbd>Tab</kbd></td><td>Plan mode; cycling further reaches autopilot</td></tr>
+        <tr><td><code>/agent</code></td><td>Choose a custom agent</td></tr>
+        <tr><td><code>/fleet</code></td><td>Parallel subagent execution of a plan</td></tr>
+        <tr><td><code>/delegate</code> or an <code>&amp;</code> prefix</td><td>Hand the task to Copilot cloud agent (branch + draft PR)</td></tr>
+        <tr><td><code>/research</code>, <code>/review</code>, <code>/security-review</code></td><td>Built-in research, code-review and security-review agents</td></tr>
+        <tr><td><code>/context</code>, <code>/compact</code></td><td>Show context usage; summarize history (auto at ~80%)</td></tr>
+        <tr><td><code>/rewind</code> · <kbd>Esc</kbd> <kbd>Esc</kbd></td><td>Roll back conversation, optionally restoring files</td></tr>
+        <tr><td><code>/clear</code>, <code>/new</code></td><td>Start a fresh conversation</td></tr>
+        <tr><td><code>/allow-all</code> (<code>/yolo</code>), <code>/reset-allowed-tools</code></td><td>Grant all permissions for the session; revoke granted permissions</td></tr>
+        <tr><td><code>/mcp</code></td><td>Add, list, enable, disable and authenticate MCP servers</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <Callout type="warn" title="Package and command names">
+    <p>
+      The CLI is installed with <code>npm install -g @github/copilot</code> and runs as <code>copilot</code>. Some Learn
+      material shows <code>npx @github/copilot-cli</code> or a <code>copilot agent run</code> subcommand; neither matches
+      the current documentation, so read such options for their intent (programmatic run, a named agent, restricted
+      tools) rather than their exact spelling.
+    </p>
+  </Callout>
+
+  <!-- ================================================================= -->
+  <h2 id="actions-blocks">GitHub Actions building blocks</h2>
+  <CodeBlock code={actionsBlocks} lang="yaml" />
+  <div class="table-wrap">
+    <table class="tbl t-slate">
+      <thead><tr><th>Building block</th><th>Why it matters for agents</th></tr></thead>
+      <tbody>
+        <tr><td><code>permissions</code></td><td>Least privilege; set a read-only default and elevate per job</td></tr>
+        <tr><td><code>concurrency</code></td><td>Stops overlapping runs; key on workflow and ref; a fixed group serializes deploys</td></tr>
+        <tr><td><code>environment</code></td><td>Required reviewers, wait timers and environment-scoped secrets gate risky jobs</td></tr>
+        <tr><td>Step outputs (<code>$GITHUB_OUTPUT</code>) and job <code>outputs</code></td><td>Explicit contracts for passing plans and risk ratings between steps and jobs</td></tr>
+        <tr><td><code>needs</code></td><td>Sequencing and fan-in</td></tr>
+        <tr><td><code>workflow_run</code></td><td>Start one workflow when another completes</td></tr>
+        <tr><td><code>if: github.event_name == 'pull_request'</code></td><td>Defensive gating so PR-only logic never runs on other triggers</td></tr>
+        <tr><td>Contexts</td><td><code>github.*</code> event metadata, <code>vars.*</code> central configuration, <code>env.*</code> runtime variables</td></tr>
+        <tr><td><code>actions/upload-artifact</code> / <code>download-artifact</code></td><td>Durable evidence and cross-job handoff; <code>retention-days</code> overrides the default 90</td></tr>
+        <tr><td><code>$GITHUB_STEP_SUMMARY</code></td><td>Human-readable evidence on the run page</td></tr>
+        <tr><td><code>GITHUB_TOKEN</code> triggers</td><td>Events created with <code>GITHUB_TOKEN</code> mostly do not start new workflow runs, preventing loops; PATs and GitHub App tokens can — design against recursion</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="pr-template">Pull request template</h3>
+  <CodeBlock code={prTemplate} lang="markdown" />
+  <p>
+    Pair it with a plan-gate required check (see <a href={`${href('skill-1-architecture-sdlc')}#validate-plans`}>Skill 1</a>)
+    and a CODEOWNERS file with required code-owner review (see
+    <a href={`${href('skill-6-guardrails')}#controlled-paths`}>Skill 6</a>).
+  </p>
+</NoteLayout>

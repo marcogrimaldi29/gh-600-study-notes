@@ -1,0 +1,331 @@
+---
+import NoteLayout from '../../layouts/NoteLayout.astro';
+import Callout from '../../components/Callout.astro';
+import CodeBlock from '../../components/CodeBlock.astro';
+import Mermaid from '../../components/Mermaid.astro';
+import { href } from '../../lib/urls';
+
+const evalFlow = `
+flowchart LR
+  ISSUE["Issue<br/>task · acceptance criteria"] --> PR["Agent opens PR<br/>references the criteria"]
+  PR --> RUNS["Workflows run<br/>build · test · lint · scans"]
+  RUNS --> GATE["Required checks<br/>enforced by ruleset"]
+  GATE --> REVIEW["Reviewer approves<br/>qualitative judgement"]
+  REVIEW --> MERGE["Merge"]
+`;
+
+const rootCause = `
+flowchart TB
+  START["Agent output is wrong or incomplete"] --> Q1{"Did it understand<br/>the task correctly?"}
+  Q1 -->|"no — wrong goal, ignored criteria"| REASON["Reasoning error<br/>fix: instructions · criteria · plan-first"]
+  Q1 -->|"yes"| Q2{"Did its tool calls<br/>succeed as intended?"}
+  Q2 -->|"no — wrong command, misused workflow"| TOOL["Tool misuse<br/>fix: tool allowlist · skills · hooks"]
+  Q2 -->|"yes"| Q3{"Was its information<br/>current and consistent?"}
+  Q3 -->|"no — stale PR, conflicting docs"| CONTEXT["Context issue<br/>fix: single source of truth · update branch"]
+  Q3 -->|"yes"| ENV["Environment issue<br/>fix: setup steps · firewall · secrets · runner"]
+`;
+
+const feedbackLoop = `
+flowchart LR
+  RUN["Run the agent"] --> OBSERVE["Observe<br/>logs · traces · artifacts"]
+  OBSERVE --> CLASSIFY["Classify<br/>the root cause"]
+  CLASSIFY --> FIX["Fix one thing<br/>instructions · memory · tools"]
+  FIX --> RERUN["Re-run and compare"]
+  RERUN --> OBSERVE
+`;
+
+const scanning = `name: Security gates
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/dependency-review-action@v5
+        with:
+          fail-on-severity: high
+
+  codeql:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: javascript-typescript
+      - uses: github/codeql-action/analyze@v4`;
+
+const evidence = `- name: Summarize the agent run for reviewers
+  if: always()
+  run: |
+    {
+      echo "## Agent evaluation"
+      echo "- Commit: \${{ github.sha }}"
+      echo "- Tests: $(jq -r '.numPassedTests' results.json) passed, $(jq -r '.numFailedTests' results.json) failed"
+      echo "- Coverage delta: $(cat coverage-delta.txt)"
+    } >> "$GITHUB_STEP_SUMMARY"
+
+- uses: actions/upload-artifact@v7
+  if: always()
+  with:
+    name: evaluation-\${{ github.run_id }}
+    path: |
+      results.json
+      coverage/`;
+
+const tunedInstructions = `# .github/copilot-instructions.md
+This is a TypeScript monorepo using pnpm workspaces.
+
+## Build and validate before every commit
+- Install: pnpm install --frozen-lockfile
+- Build:   pnpm -r build
+- Test:    pnpm -r test   (all tests must pass; do not skip or delete tests)
+- Lint:    pnpm lint
+
+## Boundaries
+- Never edit files under .github/workflows/ or infra/.
+- Database migrations live in packages/db/migrations and are append-only.
+- If a requirement is ambiguous, stop and ask in the PR instead of guessing.`;
+---
+
+<NoteLayout
+  slug="skill-4-evaluation-tuning"
+  description="GH-600 Skill 4 (15–20%): expected outcomes and operational constraints, qualitative and quantitative evaluation signals, aligning criteria with intent, automated scanning, analysing failures with logs, plans, traces and artifacts, classifying root causes, and tuning instructions, memory and tool access."
+  intro="How you know an agent did the right thing, and what you change when it did not. Define success before the run, read the evidence the platform already produces, name the root cause precisely, and tune one layer at a time — instructions, memory or tools."
+>
+  <div class="card">
+    <strong>Three objectives in this skill area:</strong>
+    <ul style="margin-bottom:0">
+      <li><a href="#success-criteria">4.1 Define success criteria and evaluation signals</a> — expected outcomes, constraints, qualitative and quantitative signals, alignment with intent, automated scanning</li>
+      <li><a href="#failure-analysis">4.2 Analyze agent failures and identify root causes</a> — logs, plans, traces, outputs, workflow artifacts; reasoning, tool, context and environment causes</li>
+      <li><a href="#tuning">4.3 Tune agent behaviour based on evaluation results</a> — instructions, workflows and constraints; memory usage; tool usage and access</li>
+    </ul>
+  </div>
+
+  <!-- ================================================================= -->
+  <h2 id="success-criteria"><span class="num">4.1</span> Define success criteria and evaluation signals</h2>
+
+  <h3 id="outcomes-constraints">Specify expected outcomes and operational constraints</h3>
+  <p>
+    Evaluation starts before the agent runs. Write the criteria into the issue, reference them from the pull request,
+    and validate against them. Alongside <em>what</em> must be true, state the <strong>operational constraints</strong>
+    the work must respect:
+  </p>
+  <div class="table-wrap">
+    <table class="tbl t-orange">
+      <thead><tr><th>Constraint</th><th>Example</th></tr></thead>
+      <tbody>
+        <tr><td>Scope</td><td>Only <code>src/</code> and lockfiles; no workflow or infrastructure changes</td></tr>
+        <tr><td>Non-goals</td><td>No refactoring beyond the fix; no new dependencies</td></tr>
+        <tr><td>Quality</td><td>No test deleted or skipped; coverage does not drop</td></tr>
+        <tr><td>Security</td><td>No new code scanning alerts; no secrets; no High/Critical dependency vulnerabilities</td></tr>
+        <tr><td>Time</td><td>Fits one cloud agent session — the hard limit is 59 minutes</td></tr>
+        <tr><td>Cost</td><td>A cap on autopilot continuations or, in Agentic Workflows, <code>max-ai-credits</code> per run</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="signals">Identify qualitative and quantitative signals</h3>
+  <div class="table-wrap">
+    <table class="tbl t-orange">
+      <thead><tr><th>Quantitative — measurable, automatable</th><th>Qualitative — needs judgement</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>
+            Required checks pass or fail · test pass rate and coverage delta · lint and type errors · new code scanning
+            alerts · secret scanning hits · dependency review findings · number of iterations before green · session
+            duration and AI credits consumed · PRs created versus merged and median time to merge (Copilot usage metrics)
+          </td>
+          <td>
+            Does the change solve the <em>actual</em> problem? · review comments and requested changes · plan quality and
+            adherence · fit with architecture and conventions · readability and maintainability · clarity of the PR
+            description and evidence · whether the scope was respected
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    Quantitative signals scale and can be enforced as gates; qualitative ones catch what no check was written to
+    detect. A healthy evaluation design uses both, and lets the quantitative gates remove the obvious failures so human
+    reviewers spend their attention on the qualitative questions.
+  </p>
+
+  <Mermaid code={evalFlow} caption="The end-to-end evaluation flow: criteria in the issue, evidence from workflows, enforcement by required checks, judgement by a reviewer." />
+
+  <h3 id="align-intent">Align evaluation criteria with development intent</h3>
+  <p>
+    An evaluation that measures the wrong thing rewards the wrong behaviour. Criteria must describe the
+    <strong>intent</strong> of the task, and each should map to a signal that can actually observe it.
+  </p>
+  <div class="table-wrap">
+    <table class="tbl t-slate">
+      <thead><tr><th>Weak criterion</th><th>Aligned criterion</th><th>Signal</th></tr></thead>
+      <tbody>
+        <tr><td>"Tests pass"</td><td>"The vulnerable version is no longer resolvable, including transitively"</td><td>Dependency alert closed; dependency review clean</td></tr>
+        <tr><td>"Add tests"</td><td>"Branch coverage of <code>auth/</code> rises above 80%, with no test removed"</td><td>Coverage report artifact; diff check on test files</td></tr>
+        <tr><td>"Fix the bug"</td><td>"Issue #312 reproduction case passes and is added as a regression test"</td><td>New test in the PR; CI result</td></tr>
+        <tr><td>"Improve performance"</td><td>"p95 of <code>/search</code> under 200 ms in the benchmark job"</td><td>Benchmark artifact compared with the base branch</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <Callout type="warn" title="Guard the gates themselves">
+    <p>
+      An agent that is judged by tests can make them pass by weakening them. Treat edits to tests, CI workflows and
+      required-check names as high-risk changes — route them to code owners and flag them in review. Renaming or removing
+      a required check silently disables a gate: if checks drift, governance drifts.
+    </p>
+  </Callout>
+
+  <h3 id="automated-scanning">Generate evaluation signals with automated scanning</h3>
+  <p>
+    GitHub's security tools produce objective signals that fit straight into a required-check model.
+  </p>
+  <div class="table-wrap">
+    <table class="tbl t-green">
+      <thead><tr><th>Tool</th><th>Signal</th><th>Where it appears</th></tr></thead>
+      <tbody>
+        <tr><td>Code scanning (CodeQL, or third-party SARIF uploads)</td><td>Vulnerabilities and coding errors in changed code</td><td>PR checks and annotations; Security tab; a ruleset can require code scanning results</td></tr>
+        <tr><td>Secret scanning and push protection</td><td>Credentials in code; push protection blocks supported secrets before they land</td><td>Alerts; blocked pushes</td></tr>
+        <tr><td>Dependency review</td><td>New dependencies with known vulnerabilities or disallowed licences</td><td>PR check (fail on a severity threshold)</td></tr>
+        <tr><td>Dependabot alerts</td><td>Vulnerable dependencies already in the repository</td><td>Security tab; good agent task sources</td></tr>
+        <tr><td>Copilot code review</td><td>An AI second opinion on the diff</td><td>Review comments on the PR</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <CodeBlock code={scanning} lang="yaml" />
+
+  <h4 id="built-in-validation">Cloud agent's built-in validation</h4>
+  <p>
+    Copilot cloud agent evaluates its own work before finishing, and tries to fix what it finds:
+  </p>
+  <ul>
+    <li><strong>CodeQL</strong> checks the code it generated for security issues.</li>
+    <li>Newly added dependencies are checked against the <strong>GitHub Advisory Database</strong> for malware and for High or Critical CVSS vulnerabilities.</li>
+    <li><strong>Secret scanning</strong> looks for API keys, tokens and other secrets.</li>
+    <li><strong>Copilot code review</strong> gives it a second opinion.</li>
+  </ul>
+  <p>
+    This <strong>does not require</strong> a GitHub Secret Protection, Code Security or Advanced Security licence. Details
+    appear in the session log, and a repository administrator can switch individual tools off under Settings → Copilot →
+    Cloud agent → <strong>Validation tools</strong> — for example to avoid duplicating another security product. It is a
+    first line of defence, not a replacement for your own required checks.
+  </p>
+
+  <Callout type="exam" title="The agent's self-check is not the gate">
+    <p>
+      Built-in validation makes the agent's output better; <strong>required status checks and reviews</strong> decide
+      whether it merges. If a question asks how to <em>guarantee</em> that no PR with a new high-severity alert can
+      merge, the answer is a ruleset requiring code scanning results or the CodeQL check — not the agent's built-in
+      CodeQL pass.
+    </p>
+  </Callout>
+
+  <!-- ================================================================= -->
+  <h2 id="failure-analysis"><span class="num">4.2</span> Analyze agent failures and identify root causes</h2>
+
+  <h3 id="evidence-sources">Identify failures with logs, plans, traces, outputs and artifacts</h3>
+  <p>
+    The first step is always to gather the evidence the platform already produced, then <strong>compare intent with
+    results</strong>: intent lives in the issue and the plan; results live in the commits, outputs and logs.
+  </p>
+  <div class="table-wrap">
+    <table class="tbl t-orange">
+      <thead><tr><th>Evidence</th><th>What it tells you</th><th>Where to find it</th></tr></thead>
+      <tbody>
+        <tr><td>Cloud agent session log</td><td>The agent's reasoning, each tool call and its result, setup and MCP start-up</td><td>Agents page; <strong>View session</strong> on the PR; the link in each commit</td></tr>
+        <tr><td>The plan</td><td>What the agent intended — compare with what it did</td><td>PR description, planning session, <code>plan.md</code></td></tr>
+        <tr><td>PR timeline and diff</td><td>What changed, when, and in response to which comment</td><td>The pull request</td></tr>
+        <tr><td>Checks tab and workflow logs</td><td>Which gate failed, and how</td><td>Checks tab; Actions tab</td></tr>
+        <tr><td>Uploaded artifacts</td><td>Durable reports that outlive scrolled-away logs</td><td>Artifacts section of the run</td></tr>
+        <tr><td>Firewall warnings</td><td>Blocked outbound requests and the command that made them</td><td>PR body or a comment</td></tr>
+        <tr><td>Hook logs</td><td>Tool calls allowed, denied or failed, with arguments</td><td>Wherever your hooks write — sent over HTTP for cloud agent, whose filesystem is ephemeral</td></tr>
+        <tr><td>Traces</td><td>Spans for each model call and tool call</td><td>OpenTelemetry from the Copilot SDK and CLI</td></tr>
+        <tr><td>Audit log</td><td>Agent actions across the organization</td><td><code>actor:Copilot</code> filter, with <code>agent_session_id</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="classify">Classify root causes</h3>
+  <Mermaid code={rootCause} caption="A quick decision path for classifying an agent failure before you try to fix it." />
+
+  <div class="table-wrap">
+    <table class="tbl t-red">
+      <thead><tr><th>Category</th><th>Typical symptoms</th><th>Usual fix</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Reasoning error</strong></td><td>Misread requirements; wrong logic; acceptance criteria ignored; plausible but wrong solution</td><td>Sharper acceptance criteria; plan-first review; clearer or more specific instructions; a narrower custom agent</td></tr>
+        <tr><td><strong>Tool misuse</strong></td><td>Wrong commands or scripts; misconfigured or untriggered workflows; the wrong MCP tool; destructive commands attempted</td><td>Restrict or re-scope tools; add a skill with the right procedure; a <code>preToolUse</code> hook to block misuse; fix workflow triggers</td></tr>
+        <tr><td><strong>Context issue</strong></td><td>Outdated PR state; missing earlier decision; conflicting information across artifacts; stale memory</td><td>One source of truth; update the branch; update the issue or PR; delete wrong memories</td></tr>
+        <tr><td><strong>Environment issue</strong></td><td>Missing dependency or tool; blocked network request; missing secret; wrong runner OS; session timeout; ruleset blocking the push</td><td><code>copilot-setup-steps.yml</code>; firewall allowlist; Agents secrets; runner label; smaller tasks; bypass actor</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <Callout type="tip" title="Symptom first, not model first">
+    <p>
+      "The model is bad" is almost never the root cause you can act on. A dependency the agent could not install is an
+      environment issue; a test it deleted to make CI pass is a reasoning issue <em>and</em> a missing guardrail. Name the
+      category, then fix the layer that owns it.
+    </p>
+  </Callout>
+
+  <!-- ================================================================= -->
+  <h2 id="tuning"><span class="num">4.3</span> Tune agent behaviour based on evaluation results</h2>
+
+  <Mermaid code={feedbackLoop} caption="Tuning is iterative: change one layer at a time, re-run, and compare with the previous evidence." />
+
+  <h3 id="tune-instructions">Revise instructions, workflows or constraints</h3>
+  <ul>
+    <li>Put <strong>build, test and validation commands</strong> in <code>.github/copilot-instructions.md</code> — an agent that can validate its own changes produces PRs that merge faster.</li>
+    <li>Add <strong>path-specific instructions</strong> where one area keeps going wrong, and say what to do when requirements are ambiguous.</li>
+    <li>Tighten a <strong>custom agent's prompt</strong> and description; split an over-broad agent into narrower ones.</li>
+    <li>Make tasks <strong>smaller</strong>, with explicit acceptance criteria and file directions; move risky work to plan-first.</li>
+    <li>Fix the <strong>workflow</strong> — triggers, required checks, a missing evidence upload.</li>
+  </ul>
+  <CodeBlock code={tunedInstructions} lang="markdown" />
+
+  <h3 id="tune-memory">Refine memory usage</h3>
+  <ul>
+    <li>Delete wrong or misleading <strong>Copilot Memory</strong> facts (repository owners, Settings → Copilot → Memory).</li>
+    <li>Move repeated corrections into <strong>instructions</strong> so they are authoritative and reviewed.</li>
+    <li>Remove conflicting instruction files and keep one source of truth per topic.</li>
+    <li>Update the issue or PR description when decisions change, so resumed sessions re-anchor correctly.</li>
+  </ul>
+
+  <h3 id="tune-tools">Refine tool usage and tool access</h3>
+  <div class="table-wrap">
+    <table class="tbl t-orange">
+      <thead><tr><th>Evaluation finding</th><th>Tool-level change</th></tr></thead>
+      <tbody>
+        <tr><td>Agent kept guessing how to install dependencies</td><td>Deterministic <code>copilot-setup-steps.yml</code></td></tr>
+        <tr><td>Request to an internal registry was blocked</td><td>Add the host to the firewall custom allowlist</td></tr>
+        <tr><td>Agent used a write-capable MCP tool it did not need</td><td>Allowlist only the read-only tools in the server's <code>tools</code> field</td></tr>
+        <tr><td>Reviewer agent edited code</td><td>Remove <code>edit</code> and <code>execute</code> from its profile's <code>tools</code></td></tr>
+        <tr><td>Agent tried <code>rm -rf</code> or <code>git push --force</code></td><td><code>preToolUse</code> hook denying the pattern; <code>--deny-tool</code> in CLI runs</td></tr>
+        <tr><td>Agent could not read Actions logs to debug CI</td><td>Enable the GitHub MCP <code>actions</code> toolset, or add a debugging skill</td></tr>
+        <tr><td>Planning agent was slow and expensive</td><td>Fewer tools means a smaller context; give it only <code>read</code> and <code>search</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <CodeBlock code={evidence} lang="yaml" />
+
+  <Callout type="note" title="Test agent changes before releasing them">
+    <p>
+      Treat a profile change like a code change. Organizations can test a custom agent privately in the
+      <code>.github/agents</code> folder of their <code>.github-private</code> repository, then release it by moving the
+      profile to the root <code>agents</code> folder. Every tuning change should land through a pull request, so the
+      history of why the agent behaves as it does stays reviewable. The lifecycle side of this is on the
+      <a href={href('skill-5-multi-agent')}>multi-agent page</a>.
+    </p>
+  </Callout>
+</NoteLayout>
