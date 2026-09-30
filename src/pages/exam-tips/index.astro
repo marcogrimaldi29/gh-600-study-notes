@@ -1,0 +1,269 @@
+---
+import NoteLayout from '../../layouts/NoteLayout.astro';
+import Callout from '../../components/Callout.astro';
+import Mermaid from '../../components/Mermaid.astro';
+import { href } from '../../lib/urls';
+
+const whichLayer = `
+flowchart TD
+  Q["What do you need Copilot to do?"]
+  Q --> A1["Follow conventions on every task"] --> R1["Custom instructions<br/>copilot-instructions.md · *.instructions.md · AGENTS.md"]
+  Q --> A2["Act as a specialist with its own tools"] --> R2["Custom agent<br/>.github/agents/*.agent.md"]
+  Q --> A3["Follow a procedure with scripts, only when relevant"] --> R3["Agent skill<br/>.github/skills/NAME/SKILL.md"]
+  Q --> A4["Reach an external system"] --> R4["MCP server<br/>with a tools allowlist"]
+  Q --> A5["Guarantee a check runs or a call is blocked"] --> R5["Hook<br/>preToolUse · postToolUse"]
+  Q --> A6["Have dependencies ready before it starts"] --> R6["copilot-setup-steps.yml"]
+  Q --> A7["Never merge without review or checks"] --> R7["Ruleset · CODEOWNERS · required checks"]
+`;
+
+const whichAutomation = `
+flowchart TD
+  Q["Recurring or event-driven agent work"] --> V{"Must the automation be<br/>versioned and reviewed as code?"}
+  V -->|"yes"| GHAW["GitHub Agentic Workflows<br/>markdown + lock file · any engine"]
+  V -->|"no"| R{"Private or internal repository,<br/>and cloud agent is enough?"}
+  R -->|"yes"| AUTO["Copilot automations<br/>schedule or event triggers"]
+  R -->|"no — one step inside existing CI"| CLI["Copilot CLI in a workflow step<br/>-p with minimal --allow-tool"]
+`;
+
+const whereControl = `
+flowchart TD
+  Q["Where should this control live?"]
+  Q --> C1["What the agent may attempt"] --> T1["Tool allowlists<br/>profile tools · MCP tools · --allow-tool"]
+  Q --> C2["What it may reach on the network"] --> T2["Agent firewall<br/>Internet access settings"]
+  Q --> C3["Which secrets it may read"] --> T3["Agents secrets<br/>environment-scoped secrets"]
+  Q --> C4["Which tool calls are refused"] --> T4["preToolUse hook<br/>--deny-tool · managed settings"]
+  Q --> C5["What may merge"] --> T5["Ruleset · required checks<br/>CODEOWNERS review"]
+  Q --> C6["What may deploy"] --> T6["Environment<br/>required reviewers"]
+`;
+---
+
+<NoteLayout
+  slug="exam-tips"
+  description="GH-600 final review: key numbers and defaults, renames, discrepancies between Learn modules and the GitHub docs, commonly confused pairs, decision trees, a scenario-to-answer lookup table and a pre-exam checklist."
+  intro="Everything you want in your head the night before. Numbers that appear in answer options, the pairs that look alike, the places where the Learn modules and the live documentation disagree, and a lookup table that maps typical scenario wording to the answer the exam expects."
+>
+  <div class="card">
+    <strong>Final review, in order:</strong>
+    <ul style="margin-bottom:0">
+      <li><a href="#key-numbers">Key numbers and defaults</a></li>
+      <li><a href="#learn-vs-docs">Where Learn and the docs disagree</a></li>
+      <li><a href="#confused-pairs">Commonly confused pairs</a></li>
+      <li><a href="#decision-trees">Decision trees</a></li>
+      <li><a href="#scenarios">Scenario → answer lookup</a></li>
+      <li><a href="#traps">Traps and caveats</a> and the <a href="#checklist">pre-exam checklist</a></li>
+    </ul>
+  </div>
+
+  <!-- ================================================================= -->
+  <h2 id="key-numbers">Key numbers and defaults</h2>
+  <div class="table-wrap">
+    <table class="tbl t-amber">
+      <thead><tr><th>Number</th><th>What it is</th></tr></thead>
+      <tbody>
+        <tr><td><strong>120 min · 700</strong></td><td>Exam duration · passing score (out of 1000); English; retake after 24 hours</td></tr>
+        <tr><td><strong>2 years</strong></td><td>Validity of GitHub certifications (moving to Microsoft's renewal process)</td></tr>
+        <tr><td><strong>59 minutes</strong></td><td>Hard limit of one Copilot cloud agent session; also the maximum <code>timeout-minutes</code> in <code>copilot-setup-steps.yml</code></td></tr>
+        <tr><td><strong>1 · 1 · 1</strong></td><td>Cloud agent works in one repository, on one branch, and opens one PR per task</td></tr>
+        <tr><td><strong>30,000</strong></td><td>Maximum characters in a custom agent's prompt</td></tr>
+        <tr><td><strong>30 s</strong></td><td>Default hook timeout (<code>timeoutSec</code>); aim for under 5 seconds</td></tr>
+        <tr><td><strong>8</strong></td><td>Consecutive <code>agentStop</code> blocks before the runaway guard ends the turn</td></tr>
+        <tr><td><strong>28 days</strong></td><td>Unused Copilot Memory entries are deleted (timer resets on validated use)</td></tr>
+        <tr><td><strong>90 days</strong></td><td>Default retention for Actions logs and artifacts (public repos 1–90, private up to 400)</td></tr>
+        <tr><td><strong>180 days</strong></td><td>Agentic activity visible with the <code>actor:Copilot</code> audit log filter</td></tr>
+        <tr><td><strong>24 hours</strong></td><td>Window of agent sessions listed on the enterprise AI Controls Agents page</td></tr>
+        <tr><td><strong>~80% · ~95%</strong></td><td>Copilot CLI starts background compaction · pauses to let it finish</td></tr>
+        <tr><td><strong>20 KiB</strong></td><td>CLI tool output above this is saved to a file; only a preview enters context</td></tr>
+        <tr><td><strong>10 MB · 500 files</strong></td><td>CLI rewind cannot restore files above 10 MB or turns that changed more than 500 files</td></tr>
+        <tr><td><strong>1 AIC = $0.01 · 1,000</strong></td><td>AI credit value · default <code>max-ai-credits</code> per Agentic Workflows run</td></tr>
+        <tr><td><strong><code>COPILOT_MCP_</code></strong></td><td>Required prefix for Agents secrets and variables that MCP configuration can use</td></tr>
+        <tr><td><strong><code>copilot/</code></strong></td><td>Prefix of the branch cloud agent creates</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <Callout type="warn" title="One default the docs disagree on">
+    <p>
+      The autopilot concept page says autopilot pauses after <strong>5</strong> automatic continuations by default; the
+      CLI command reference lists <code>--max-autopilot-continues</code> with a default of <strong>unlimited</strong>.
+      The safe exam answer for automation is the same either way: <strong>set the limit explicitly</strong>.
+    </p>
+  </Callout>
+
+  <!-- ================================================================= -->
+  <h2 id="learn-vs-docs">Where Learn and the docs disagree</h2>
+  <p>
+    The Learn modules were written quickly against a moving product, and several examples are conceptual rather than
+    exact. The exam tests the concepts; when a detail matters, the live GitHub documentation is the authority.
+  </p>
+  <div class="table-wrap">
+    <table class="tbl t-amber">
+      <thead><tr><th>Learn module shows</th><th>The GitHub docs say</th><th>What to remember</th></tr></thead>
+      <tbody>
+        <tr><td><code>applyTo</code> globs in a custom agent profile</td><td><code>applyTo</code> is frontmatter for path-specific <code>*.instructions.md</code> files; agent profiles scope through <code>tools</code> and the prompt</td><td>Path scoping = instructions; capability scoping = tools</td></tr>
+        <tr><td>Hooks as <code>{'{"trigger": "pre-tool-use", "run": …}'}</code> or rule lists with <code>permissionDecision</code></td><td><code>{'{"version": 1, "hooks": {"preToolUse": [{"type": "command", "bash": …}]}}'}</code>; the script prints <code>permissionDecision</code> JSON</td><td>The concept is right: pre-tool hooks block, post-tool hooks log, error hooks escalate</td></tr>
+        <tr><td><code>npx @github/copilot-cli</code>; <code>copilot agent run CodeAgent</code></td><td><code>npm install -g @github/copilot</code>, then <code>copilot -p</code> and <code>copilot --agent=NAME</code></td><td>Read the intent: programmatic run, named agent, restricted tools</td></tr>
+        <tr><td><code>COPILOT_GITHUB_TOKEN: {'${{ secrets.GITHUB_TOKEN }}'}</code></td><td><code>GITHUB_TOKEN</code> plus <code>copilot-requests: write</code> (org billing policy on), or a fine-grained PAT with Copilot Requests in <code>COPILOT_GITHUB_TOKEN</code></td><td>Built-in token for org automation; PAT for personal repos</td></tr>
+        <tr><td>"Copilot cannot sign commits" — add a bypass actor for "require signed commits"</td><td>Copilot's commits are signed and show as Verified; it may be blocked by rules on other commit metadata, such as allowed authors</td><td>The fix is still "add Copilot as a bypass actor on the ruleset"</td></tr>
+        <tr><td>Cloud agent never opens a PR itself; you decide</td><td>Agents-tab sessions do not open a PR unless asked; issue assignment and CLI <code>/delegate</code> open a draft PR</td><td>Either way a human marks it ready, approves and merges</td></tr>
+        <tr><td><code>agents:</code> and <code>handoffs:</code> in a planner profile</td><td><code>handoffs</code> and <code>argument-hint</code> are VS Code properties, ignored by cloud agent on GitHub.com</td><td>Subagent orchestration on GitHub uses the <code>agent</code> tool</td></tr>
+        <tr><td>MCP allowlist = registry with Allow all / Registry only</td><td>Also true, but <code>managed-settings.json</code> allowlists are now GA and recommended; neither registries nor these policies govern cloud agent</td><td>Cloud agent MCP is governed by repository settings and profiles</td></tr>
+        <tr><td>A plan gate that checks for <code>Github/pull_request_template.md</code></td><td>The template lives at <code>.github/pull_request_template.md</code>; a meaningful gate inspects the PR body</td><td>A gate validates plan shape, not plan quality</td></tr>
+        <tr><td>"Copilot coding agent", "Copilot Cloud Agent" used interchangeably</td><td>Renamed to Copilot cloud agent in April 2026</td><td>Same agent, same security model</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ================================================================= -->
+  <h2 id="confused-pairs">Commonly confused pairs</h2>
+  <div class="table-wrap">
+    <table class="tbl t-amber">
+      <thead><tr><th>Pair</th><th>The difference</th></tr></thead>
+      <tbody>
+        <tr><td>Custom instructions vs custom agent</td><td>Instructions are always-on context for every request; a custom agent is a selectable persona with its own prompt, tools and MCP servers</td></tr>
+        <tr><td>Custom agent vs agent skill</td><td>An agent is chosen for a task; a skill is loaded automatically when relevant and can bundle scripts</td></tr>
+        <tr><td>Skill vs prompt file</td><td>Skills are picked up automatically (cloud agent, CLI, IDE); prompt files are run manually in the IDE</td></tr>
+        <tr><td>Instructions vs hooks</td><td>Instructions guide; hooks execute deterministically and <code>preToolUse</code> can deny</td></tr>
+        <tr><td><code>--available-tools</code> vs <code>--allow-tool</code></td><td>What the model can see vs what runs without a prompt</td></tr>
+        <tr><td><code>--allow-all</code> vs autopilot vs <code>--no-ask-user</code></td><td>Permissions vs continuing autonomously across steps vs suppressing clarifying questions</td></tr>
+        <tr><td><code>disable-model-invocation</code> vs <code>user-invocable</code></td><td>Stops automatic selection (and subagent calls) vs hides from manual selection</td></tr>
+        <tr><td>Repository MCP settings vs <code>mcp-servers</code> in a profile</td><td>Shared by cloud agent and code review for the repo vs available to that one agent</td></tr>
+        <tr><td>Agents secrets vs Actions secrets</td><td>Agents secrets reach cloud agent (<code>COPILOT_MCP_*</code> only MCP servers); Actions, Codespaces and Dependabot secrets never do</td></tr>
+        <tr><td>Workflow <code>GITHUB_TOKEN</code> vs Copilot's session token</td><td>The workflow token runs setup steps; Copilot gets its own scoped token for its session</td></tr>
+        <tr><td>Agent firewall vs MCP allowlist</td><td>Firewall limits network egress of agent shell processes; allowlists decide which MCP servers can run in IDEs and CLI</td></tr>
+        <tr><td>Copilot cloud agent vs agent mode</td><td>Asynchronous on a GitHub Actions runner, delivers a branch/PR vs synchronous edits in your local IDE</td></tr>
+        <tr><td>Automations vs Agentic Workflows</td><td>Automations are private to their creator, stored outside Git, private/internal repos only, cloud agent only; Agentic Workflows are versioned markdown, reviewed through PRs, any engine</td></tr>
+        <tr><td>Copilot Memory vs custom instructions</td><td>Learned, validated and expiring vs written, reviewed and versioned</td></tr>
+        <tr><td>Rulesets vs branch protection</td><td>Rulesets are layered, reusable and support bypass actors such as Copilot; either can require checks and reviews</td></tr>
+        <tr><td>CODEOWNERS vs required reviews</td><td>CODEOWNERS routes review requests; only "require review from Code Owners" makes their approval mandatory</td></tr>
+        <tr><td>Plan-first vs plan + execution</td><td>Validation before any code vs before merge; choose by risk and reversibility</td></tr>
+        <tr><td>Workflow-level vs job-level concurrency</td><td>Workflow-level stops overlapping runs; job-level only coordinates within a run</td></tr>
+        <tr><td>Step outputs vs job outputs vs <code>env</code></td><td>Within a job vs across jobs via <code>needs</code> vs runtime configuration, not structured data flow</td></tr>
+        <tr><td>Automation approvals vs security controls</td><td>Approvals decide what should apply; permissions decide what can</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ================================================================= -->
+  <h2 id="decision-trees">Decision trees</h2>
+  <h3 id="tree-layer">Which customization layer?</h3>
+  <Mermaid code={whichLayer} caption="Pick the layer by the job it does. Only the last three can guarantee behaviour." />
+  <h3 id="tree-control">Where should the control live?</h3>
+  <Mermaid code={whereControl} caption="Each kind of limit has one natural home in the platform." />
+  <h3 id="tree-automation">Which automation mechanism?</h3>
+  <Mermaid code={whichAutomation} caption="Choosing between Agentic Workflows, automations and the CLI in CI." />
+
+  <!-- ================================================================= -->
+  <h2 id="scenarios">Scenario → answer lookup</h2>
+  <div class="table-wrap">
+    <table class="tbl t-amber">
+      <thead><tr><th>If the scenario says…</th><th>…the answer is usually</th></tr></thead>
+      <tbody>
+        <tr><td>"Guarantee the planning agent cannot modify files"</td><td>Read-only <code>tools</code> list in its profile — not an instruction</td></tr>
+        <tr><td>"Review the approach before any code is written" for an infra change</td><td>Plan-first: a plan-only PR or session, approved, then an explicit handoff</td></tr>
+        <tr><td>"Agent keeps failing to install private packages"</td><td><code>copilot-setup-steps.yml</code> + Agents secrets for the registry + firewall allowlist entry</td></tr>
+        <tr><td>"Request to an internal host was blocked; warning in the PR"</td><td>Add the domain or URL to the firewall custom allowlist</td></tr>
+        <tr><td>"MCP server needs an API key"</td><td>Agents secret named <code>COPILOT_MCP_…</code>, referenced as <code>$COPILOT_MCP_…</code></td></tr>
+        <tr><td>"Cloud agent should read issues in another repository"</td><td>Configure the GitHub MCP server in repo MCP settings with a PAT or GitHub App, ideally on <code>/readonly</code></td></tr>
+        <tr><td>"Only approved MCP servers may be used in VS Code and the CLI"</td><td><code>managed-settings.json</code> <code>allowedMcpServers</code> (or registry + Registry only)</td></tr>
+        <tr><td>"Enable only the Actions tools of the remote GitHub MCP server"</td><td><code>X-MCP-Toolsets: actions</code> header or the <code>/mcp/x/actions</code> URL</td></tr>
+        <tr><td>"Cloud agent is blocked by a commit-author rule"</td><td>Add Copilot as a bypass actor on the ruleset</td></tr>
+        <tr><td>"Workflows did not run on Copilot's PR"</td><td>Expected — a user with write access clicks <strong>Approve and run workflows</strong></td></tr>
+        <tr><td>"The developer who assigned the issue cannot approve the PR"</td><td>By design — the requester is co-author; another reviewer approves</td></tr>
+        <tr><td>"Run an agent nightly in CI with no stored PAT"</td><td><code>GITHUB_TOKEN</code> + <code>copilot-requests: write</code> + org billing policy — or Agentic Workflows</td></tr>
+        <tr><td>"The CI agent step should only run git commands"</td><td><code>--allow-tool='shell(git:*)'</code> (plus <code>--deny-tool</code> for anything like <code>git push</code>)</td></tr>
+        <tr><td>"Block <code>rm -rf</code> for every agent session in the repo"</td><td><code>preToolUse</code> hook in <code>.github/hooks/</code> on the default branch</td></tr>
+        <tr><td>"The block must hold even if the hook script crashes"</td><td>Command <code>preToolUse</code> hooks fail closed on errors — but timeouts fail open, so keep it fast</td></tr>
+        <tr><td>"Two agent PRs keep conflicting on the lockfile"</td><td>Scope boundaries per agent + CODEOWNERS + merge-validation check; escalate after two failures</td></tr>
+        <tr><td>"Stop overlapping runs of the same workflow on a PR"</td><td><code>concurrency: {'${{ github.workflow }}-${{ github.ref }}'}</code> with <code>cancel-in-progress: true</code></td></tr>
+        <tr><td>"Merge the outputs of two parallel analysis jobs"</td><td>A third job with <code>needs: [a, b]</code> (fan-in)</td></tr>
+        <tr><td>"Run security validation only after CI finishes"</td><td><code>workflow_run</code> on the CI workflow's <code>completed</code> event</td></tr>
+        <tr><td>"Watch a stalled cloud agent run live from the terminal"</td><td><code>gh agent-task view --log --follow</code></td></tr>
+        <tr><td>"Find everything agents did in the org last month"</td><td>Audit log filtered by <code>actor:Copilot</code>, grouped by <code>agent_session_id</code></td></tr>
+        <tr><td>"An evidence artifact disappeared"</td><td>Audit log <code>action:artifact.destroy</code></td></tr>
+        <tr><td>"Resume yesterday's agent work without redoing it"</td><td>Re-anchor to the PR: description, linked issue, commits, Checks tab</td></tr>
+        <tr><td>"Agent used outdated information from an old branch state"</td><td>Stale context: update the branch, re-run checks, re-read the issue</td></tr>
+        <tr><td>"Agent keeps making the same repository-specific mistake"</td><td>Add it to custom instructions (authoritative); delete any wrong Copilot Memory fact</td></tr>
+        <tr><td>"Stop the orchestrator from auto-invoking a destructive agent, keep it selectable"</td><td><code>disable-model-invocation: true</code></td></tr>
+        <tr><td>"Test an org-wide custom agent before everyone gets it"</td><td>Put it in <code>.github/agents</code> of <code>.github-private</code>, then move it to <code>agents/</code></td></tr>
+        <tr><td>"Deploys must wait for a named approver and use prod secrets only"</td><td>Environment with required reviewers and environment-scoped secrets</td></tr>
+        <tr><td>"Triage automation should only auto-apply confident label changes"</td><td>Automation level <em>Cautious</em> (the default)</td></tr>
+        <tr><td>"Reviewers approve agent PRs without reading them"</td><td>Rubber-stamping: smaller PRs, evidence-first, CODEOWNERS routing, fewer low-value approvals</td></tr>
+        <tr><td>"Agent's task is vague and open-ended"</td><td>Do not run it autonomously — define criteria, constraints and paths first</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ================================================================= -->
+  <h2 id="traps">Traps and caveats</h2>
+
+  <Callout type="exam" title="Enforcement beats guidance">
+    <p>
+      If two answers differ only in whether the rule is <em>written down</em> or <em>enforced</em> — an instruction versus
+      a tool allowlist, a README policy versus a ruleset, "ask the agent to" versus a hook — the enforced option is the
+      one the exam wants.
+    </p>
+  </Callout>
+
+  <Callout type="exam" title="Cloud agent MCP tools run without asking">
+    <p>
+      There is no approval prompt for MCP tools in cloud agent. The only protection is the <code>tools</code> allowlist
+      you configure, so allowlist specific read-only tools and treat adding MCP tools like adding a high-risk dependency.
+    </p>
+  </Callout>
+
+  <Callout type="warn" title="The firewall has gaps">
+    <p>
+      It covers processes the agent starts through its shell tool — not MCP server processes, not setup-step processes —
+      and it is incompatible with self-hosted and Windows runners, where you must bring your own network controls.
+    </p>
+  </Callout>
+
+  <Callout type="warn" title="Preview features can appear">
+    <p>
+      Copilot Memory, custom agents in some IDEs, third-party agents, automations' rationale and approvals, and GitHub
+      Agentic Workflows are public preview at the time of writing. Commonly used preview features may be tested — learn
+      their behaviour, not just their names.
+    </p>
+  </Callout>
+
+  <Callout type="tip" title="Read the execution context first">
+    <p>
+      Before evaluating the options, decide where the agent in the question is running: cloud agent, CLI on a laptop, CLI
+      in a workflow, Agentic Workflows, or IDE agent mode. Many wrong answers are correct controls for a
+      <em>different</em> surface — a private MCP registry for cloud agent, or a repository firewall rule for a local CLI
+      session.
+    </p>
+  </Callout>
+
+  <!-- ================================================================= -->
+  <h2 id="checklist">Pre-exam checklist</h2>
+  <div class="card">
+    <ul class="checklist">
+      <li>I can explain assistant vs agent, the plan → act → evaluate loop and the contributor model.</li>
+      <li>I can name the GitHub controls that make up the control plane and what each enforces.</li>
+      <li>I can write a custom agent profile from memory, including <code>tools</code> semantics and the two invocation flags.</li>
+      <li>I know where instructions, agents, skills, hooks, setup steps, MCP settings and Agents secrets live.</li>
+      <li>I can read repository MCP JSON and spot a missing <code>type</code> or <code>tools</code>, or a secret without <code>COPILOT_MCP_</code>.</li>
+      <li>I know what the default GitHub MCP token can do in cloud agent, and how to widen it safely.</li>
+      <li>I can compare registry restriction with <code>managed-settings.json</code> allowlists, and know neither governs cloud agent.</li>
+      <li>I know cloud agent's limits: one repo, one branch, one PR, 59 minutes, draft PRs, workflow approval, firewall.</li>
+      <li>I can choose between Agentic Workflows, automations and the CLI in CI, and authenticate each correctly.</li>
+      <li>I can design bounded retries, escalation, rollback and traceability for an agent workflow.</li>
+      <li>I can place information correctly across short-term, long-term and external memory, and explain Copilot Memory's rules.</li>
+      <li>I can detect and correct drift, and prevent conflicting and stale context.</li>
+      <li>I can classify a failure as reasoning, tool, context or environment, and name the fix layer.</li>
+      <li>I can write fan-out/fan-in, <code>workflow_run</code> and concurrency YAML, and explain isolation.</li>
+      <li>I can add, update, replace and retire a custom agent without breaking active work.</li>
+      <li>I can classify actions by risk, assign an autonomy level, and explain how <code>preToolUse</code> hooks fail.</li>
+      <li>I can name the approvals that reduce risk — and the ones that only slow delivery.</li>
+    </ul>
+  </div>
+
+  <Callout type="note" title="Last pass">
+    <p>
+      Skim the <a href={href('config-reference')}>Configuration reference</a> once more, re-read the Exam callouts on each
+      skill page, and try the <a href="https://ghcertdemo.starttest.com/" target="_blank" rel="noopener">exam sandbox</a>
+      so the interface is familiar. Good luck.
+    </p>
+  </Callout>
+</NoteLayout>

@@ -1,0 +1,22 @@
+{
+  "name": "gh-600-study-notes",
+  "type": "module",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Study notes for Exam GH-600: Developing in Agentic AI Systems (GitHub Certified: Agentic AI Developer).",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "astro dev",
+    "start": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "astro": "astro"
+  },
+  "dependencies": {
+    "@primer/octicons": "^19.38.0",
+    "astro": "^7.3.5",
+    "mermaid": "^11.17.2"
+  }
+}

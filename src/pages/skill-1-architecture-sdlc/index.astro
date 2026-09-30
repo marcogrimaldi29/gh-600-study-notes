@@ -1,0 +1,466 @@
+---
+import NoteLayout from '../../layouts/NoteLayout.astro';
+import Callout from '../../components/Callout.astro';
+import CodeBlock from '../../components/CodeBlock.astro';
+import Mermaid from '../../components/Mermaid.astro';
+import { href } from '../../lib/urls';
+
+const sdlcMap = `
+flowchart LR
+  PLAN["Planning<br/>draft scope · steps · success criteria"] --> IMPL["Implementation<br/>branch · commits · pull request"]
+  IMPL --> VAL["Validation<br/>checks · scans · artifacts"]
+  VAL --> ACC["Acceptance<br/>CODEOWNERS · reviews · rulesets"]
+  ACC --> DEP["Deployment<br/>environment approval"]
+`;
+
+const planFirst = `
+sequenceDiagram
+  participant H as Human reviewer
+  participant P as Planning agent (read-only tools)
+  participant GH as Pull request
+  participant I as Implementation agent
+  participant CI as Required checks
+  H->>P: Assign the issue
+  P->>GH: Open PR containing only the plan
+  H->>GH: Review, refine, approve the plan
+  H->>I: Explicit handoff: implement the approved plan
+  I->>GH: Push commits to the same branch
+  GH->>CI: Run build, tests, scans
+  CI-->>H: Evidence for the merge decision
+`;
+
+const autonomyLadder = `
+flowchart LR
+  R["Read-only<br/>inspect · summarize · recommend"] --> P["Propose-only<br/>branch and PR, cannot merge"]
+  P --> G["Execute with guardrails<br/>pre-approved workflows, staging"]
+  G --> H["Human-authorized execution<br/>prod deploy · secrets · workflow edits"]
+`;
+
+const taskContract = `## Task: remediate CVE in lodash (issue #482)
+
+### Inputs
+- Security alert: dependabot/alerts/57
+- Allowed paths: package.json, package-lock.json, src/**
+- Not allowed: .github/workflows/**, infra/** (platform review required)
+- Constraints: no new dependencies; no direct pushes to main
+
+### Outputs
+- A pull request with: plan section, bounded commits on copilot/*,
+  links to the workflow run and the code scanning result
+
+### Success criteria
+- [ ] Vulnerable version no longer resolvable (including transitive paths)
+- [ ] Required checks pass: build, test, lint, CodeQL
+- [ ] Only files in the allowed paths changed
+- [ ] Rollback note present (revert the merge commit)`;
+
+const requiredCheck = `# .github/workflows/pr-validation.yml
+# Marked as a *required* status check in the branch ruleset, so a PR —
+# human or agent — cannot merge until every job here passes.
+name: PR validation
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: npm ci
+      - run: npm test
+
+  codeql:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write   # upload SARIF results
+    steps:
+      - uses: actions/checkout@v7
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: javascript-typescript
+      - uses: github/codeql-action/analyze@v4`;
+
+const plannerAgent = `---
+name: implementation-planner
+description: Produces a structured, reviewable implementation plan. Never edits source code.
+tools: ["read", "search"]
+---
+
+You are a planning specialist. For the task you are given:
+
+1. Restate the goal and list explicit non-goals.
+2. List every file you expect to change, and why.
+3. Break the work into numbered steps with a risk rating (low | medium | high).
+4. Define verifiable success criteria that map to CI checks.
+5. Describe the rollback path and when to escalate to a human.
+
+Write the plan as the pull request description. Do not modify any file.`;
+
+const planGate = `# .github/workflows/plan-gate.yml
+# Fails the PR unless its description contains the required plan sections.
+name: Plan gate
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  require-plan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the PR body for a plan
+        env:
+          BODY: \${{ github.event.pull_request.body }}
+        run: |
+          for section in "## Plan" "Success criteria" "Rollback"; do
+            if ! grep -qF "$section" <<< "$BODY"; then
+              echo "::error::PR description is missing: $section"
+              exit 1
+            fi
+          done`;
+
+const planJson = `{
+  "goal": "Remove vulnerable lodash 4.17.20",
+  "risk": "medium",
+  "paths": ["package.json", "package-lock.json"],
+  "steps": [
+    "Bump lodash to 4.17.21",
+    "Regenerate the lockfile",
+    "Run tests and CodeQL"
+  ],
+  "success_criteria": ["alert #57 closed", "required checks green"],
+  "rollback": "revert merge commit"
+}`;
+
+const approvalGate = `# The agent can prepare the change, but the job that applies it pauses
+# until a required reviewer on the "production" environment approves.
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    environment:
+      name: production        # required reviewers + scoped secrets
+    steps:
+      - uses: actions/checkout@v7
+      - run: ./scripts/apply-plan.sh plan.json`;
+---
+
+<NoteLayout
+  slug="skill-1-architecture-sdlc"
+  description="GH-600 Skill 1 (15–20%): integrating agents into the SDLC, choosing tasks, anti-patterns, task contracts with inputs, outputs and success criteria, separating planning from execution, structured and validated plans, autonomy levels, inspectable artifacts and human intervention without slowing delivery."
+  intro="The design quarter of the exam. It rewards you for scoping agents to the right SDLC stage, writing tasks an agent can actually be judged against, keeping the plan visible and approved before risky execution, and dialling autonomy up or down with GitHub controls rather than hope."
+>
+  <div class="card">
+    <strong>Three objectives in this skill area:</strong>
+    <ul style="margin-bottom:0">
+      <li><a href="#integrate">1.1 Integrate agents into the SDLC</a> — which steps agents take, anti-patterns, inputs, outputs and success criteria</li>
+      <li><a href="#boundaries">1.2 Define boundaries between planning, reasoning and action</a> — plan distinct from execution, structured plans, validation, no action before approval</li>
+      <li><a href="#observability-control">1.3 Configure observability and control for autonomous agents</a> — degree of autonomy, inspectable artifacts, human intervention without slowing delivery</li>
+    </ul>
+  </div>
+
+  <!-- ================================================================= -->
+  <h2 id="integrate"><span class="num">1.1</span> Integrate agents into the SDLC</h2>
+
+  <h3 id="map-to-stages">Map agent responsibilities to SDLC stages</h3>
+  <p>
+    An agent treated as a general-purpose developer across the whole lifecycle is hard to reason about, hard to limit
+    and hard to audit. The reliable pattern is to scope agents to <strong>specific stages where GitHub can enforce a
+    boundary</strong>. Most teams start with implementation and validation, because pull requests and workflows provide
+    natural control points there.
+  </p>
+
+  <Mermaid code={sdlcMap} caption="Each SDLC stage has a GitHub surface where the agent's work is recorded and a control that decides whether it moves on." />
+
+  <div class="table-wrap">
+    <table class="tbl t-violet">
+      <thead><tr><th>SDLC stage</th><th>Typical agent responsibility</th><th>Primary artifact</th></tr></thead>
+      <tbody>
+        <tr><td>Planning</td><td>Draft scope, plan steps, define success criteria, research the codebase</td><td>Issues, PR description, the Agents tab research and plan session</td></tr>
+        <tr><td>Implementation</td><td>Create a branch, make changes, open or update the PR</td><td>Branch, commits, pull request</td></tr>
+        <tr><td>Validation</td><td>Run checks, attach evidence, iterate on failures</td><td>Workflow runs, status checks, artifacts</td></tr>
+        <tr><td>Acceptance</td><td>None — this is human judgement plus policy</td><td>CODEOWNERS reviews, rulesets, required checks</td></tr>
+        <tr><td>Deployment</td><td>Usually restricted: the agent prepares, a human approves</td><td>Environments with required reviewers</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>Three architectural boundaries follow from this map:</p>
+  <ul>
+    <li><strong>Scope early to reduce blast radius</strong> — limit which directories an agent may change, by policy and by ownership.</li>
+    <li><strong>Treat workflow and infrastructure changes as higher risk</strong> than application code — a two-line diff in <code>.github/workflows/</code> can change what every future run is allowed to do.</li>
+    <li><strong>Prefer PR-based work even for automation</strong> — never direct-to-default-branch changes.</li>
+  </ul>
+
+  <Callout type="exam" title="Agents propose; humans and policy accept">
+    <p>
+      This one sentence resolves a large share of Skill 1 questions. The agent's responsibility for a dependency fix
+      ends when it has opened a pull request with a plan and the expected success signals. Validation and acceptance
+      happen through checks, reviews and policy — not through the agent declaring success.
+    </p>
+  </Callout>
+
+  <h3 id="identify-steps">Identify steps for agents to perform</h3>
+  <p>
+    Copilot cloud agent does best with <strong>clear, well-scoped tasks</strong>: a clear description of the problem,
+    complete acceptance criteria, and directions about which files need to change. Think of an issue assigned to Copilot
+    as a prompt — would it work as one?
+  </p>
+
+  <div class="table-wrap">
+    <table class="tbl t-green">
+      <thead><tr><th>Good first candidates for an agent</th><th>Keep for a human (or plan-first with heavy review)</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>
+            Bug fixes with a reproducible symptom · UI tweaks · improving test coverage · documentation updates ·
+            accessibility fixes · technical debt · dependency bumps · lint and formatting fixes · resolving merge
+            conflicts · CI failure investigation
+          </td>
+          <td>
+            Broad, cross-repository refactoring · complex legacy dependencies · deep domain or business logic · large
+            changes that need design consistency · production-critical issues · security, PII or authentication
+            changes · incident response · ambiguous or open-ended tasks · tasks the developer wants to learn from
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="anti-patterns">Identify and mitigate common anti-patterns</h3>
+  <div class="table-wrap">
+    <table class="tbl t-red">
+      <thead><tr><th>Anti-pattern</th><th>Symptom</th><th>Mitigation</th></tr></thead>
+      <tbody>
+        <tr><td>Planless execution</td><td>The PR has a diff but no plan or rationale</td><td>PR template with a required plan section, a plan-gate check, plan-first for risky work</td></tr>
+        <tr><td>General-purpose agent</td><td>One agent touches app code, workflows and infra in the same PR</td><td>Narrow custom agents, each with a scoped prompt and tool list; CODEOWNERS on sensitive paths</td></tr>
+        <tr><td>Over-permissioned agent</td><td>Token or tools can write anywhere and read every secret</td><td>Least-privilege <code>permissions</code>, tool allowlists, Agents secrets only for what it needs</td></tr>
+        <tr><td>Hidden reasoning</td><td>Reviewers see only the output</td><td>Plan artifact, session logs, decisions recorded in the PR</td></tr>
+        <tr><td>Vague success criteria</td><td>"Tests pass" while the real goal is unmet</td><td>Criteria that encode intent ("vulnerability no longer resolvable") and map to checks</td></tr>
+        <tr><td>Blind trust in automation</td><td>"CI is green, merge it"</td><td>Checks plus code-owner review plus risk-based approvals</td></tr>
+        <tr><td>Unbounded iteration</td><td>The agent retries the same failing check forever</td><td>Retry limit, then escalate with a summary</td></tr>
+        <tr><td>Controls in docs only</td><td>"Agents must not edit workflows" written in a README</td><td>Enforce it: tool allowlist, <code>preToolUse</code> hook, CODEOWNERS with required review</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="inputs-outputs-criteria">Define inputs, outputs and success criteria</h3>
+  <p>
+    Every agent task should be defined as a small contract. Under-specified tasks produce changes that look plausible
+    but do not solve the underlying problem.
+  </p>
+  <dl class="terms">
+    <dt>Inputs</dt>
+    <dd>What the agent needs: the issue or alert, repository scope (allowed and forbidden paths), constraints and non-goals.</dd>
+    <dt>Outputs</dt>
+    <dd>What it must produce: a plan, a bounded changeset on its branch, a pull request, and links to the evidence.</dd>
+    <dt>Success criteria</dt>
+    <dd>How the result is judged: required checks, security signals, review outcome, scope matching intent, a rollback note for risky changes.</dd>
+  </dl>
+
+  <CodeBlock code={taskContract} lang="markdown" label="Task contract" />
+
+  <p>
+    The criteria only become <em>enforced</em> when they map to required status checks. A workflow like the one below,
+    marked as required in a ruleset, means the pull request cannot merge until it passes — success is decided by the
+    system, not assumed by the agent.
+  </p>
+
+  <CodeBlock code={requiredCheck} lang="yaml" />
+
+  <Callout type="tip" title={'"CI passed" is necessary, not sufficient'}>
+    <p>
+      Make success criteria describe the <em>intent</em> of the task. An agent can bump a dependency and keep every test
+      green while the vulnerable version is still reachable through a transitive dependency. "Vulnerability resolved" is a
+      success criterion; "tests pass" is only one of its signals.
+    </p>
+  </Callout>
+
+  <!-- ================================================================= -->
+  <h2 id="boundaries"><span class="num">1.2</span> Define boundaries between planning, reasoning and action</h2>
+
+  <h3 id="why-separate">Why separate planning from execution</h3>
+  <p>
+    Reliable agent systems separate three things: <strong>planning</strong> (what will be done and why),
+    <strong>execution</strong> (the concrete changes) and <strong>validation</strong> (evidence the outcome meets the
+    criteria). When planning and execution are mixed, reviewers see only the final diff and lose the chance to catch a
+    misunderstanding before it becomes code. GitHub maps the three naturally: the plan in the PR description or an
+    issue, execution as commits on a branch, validation as checks, scans and reviews.
+  </p>
+
+  <h3 id="plan-first-vs-combined">Plan-first versus plan + execution</h3>
+  <p>
+    Whether the plan starts from an issue assigned to Copilot or from a planning session in the Agents tab, all work
+    converges on a pull request. The real design choice is <strong>when human validation happens relative to code
+    being generated</strong>.
+  </p>
+
+  <div class="table-wrap">
+    <table class="tbl t-violet">
+      <thead><tr><th></th><th>Option A — plan-first</th><th>Option B — plan + execution in one PR</th></tr></thead>
+      <tbody>
+        <tr><td>How it works</td><td>The PR (or session) contains only the plan; reviewers approve it; implementation follows</td><td>The PR carries a plan section and initial commits; the plan evolves with the code</td></tr>
+        <tr><td>Validation happens</td><td><strong>Before</strong> any code is written</td><td>After code exists, but still before merge</td></tr>
+        <tr><td>Risk exposure</td><td>Lowest — nothing to unwind if the plan is wrong</td><td>Early exposure: unnecessary changes, more reviewer effort, plan and code can drift apart</td></tr>
+        <tr><td>Use it for</td><td>High-risk or hard-to-reverse work: workflows, infra, auth, production, security</td><td>Low and medium-risk, easily reversible work where speed matters</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <Mermaid code={planFirst} caption="A plan-first handoff: a read-only planning agent proposes, a human approves, and only then does an implementation agent write code." />
+
+  <p>
+    Both options use the same GitHub controls, and in both the code cannot merge without checks and reviews. The risk
+    difference exists during the proposal stage, not after merge. The choice is never <em>whether</em> the work is
+    reviewed — it always is — but how early change is allowed into the workflow.
+  </p>
+
+  <h3 id="enforce-planning">Enforcing the planning boundary</h3>
+  <ol class="steps" style="--accent:var(--s1)">
+    <li><strong>Capability boundary.</strong> Give the planning agent read-only tools (<code>tools: ["read", "search"]</code>) so it physically cannot modify files while planning.</li>
+    <li><strong>Explicit handoff.</strong> Execution starts only after the plan is approved, through a deliberate transition to an implementation agent — a new session, a selected custom agent, or a <code>@copilot implement the approved plan</code> comment.</li>
+    <li><strong>Tool gating in orchestrators.</strong> In automated pipelines, run planning with no write tools and enable them only once the plan is accepted.</li>
+    <li><strong>Plan mode.</strong> Copilot CLI has a plan mode (<kbd>Shift</kbd>+<kbd>Tab</kbd>, <code>/plan</code> or <code>--plan</code>) that produces a plan and pauses; Copilot cloud agent can research and plan on GitHub.com before any code is written, and sessions do not open a pull request unless you ask.</li>
+  </ol>
+
+  <Callout type="exam" title="Guidance versus enforcement, again">
+    <p>
+      "Do not edit files during planning" in the agent's prompt is guidance. A <code>tools</code> list without
+      <code>edit</code> or <code>execute</code> is enforcement. When a question asks how to <em>guarantee</em> that the
+      planning phase cannot change code, pick the tool restriction.
+    </p>
+  </Callout>
+
+  <h3 id="structured-plan">Configure an agent to output a structured plan</h3>
+  <p>
+    A plan is only reviewable — and only machine-checkable — if it has a predictable shape. Three complementary
+    techniques:
+  </p>
+  <ul>
+    <li>A <strong>custom planning agent</strong> whose prompt prescribes the structure and whose tools are read-only.</li>
+    <li>A <strong>pull request template</strong> (<code>.github/pull_request_template.md</code>) with required Plan, Evidence and Rollback sections.</li>
+    <li>A <strong>machine-readable plan</strong> (<code>plan.json</code>) uploaded as a workflow artifact, so downstream jobs can route on fields such as <code>risk</code>.</li>
+  </ul>
+
+  <CodeBlock code={plannerAgent} lang="markdown" label=".github/agents/implementation-planner.agent.md" />
+  <CodeBlock code={planJson} lang="json" label="plan.json" />
+
+  <h3 id="validate-plans">Validate agent plans</h3>
+  <p>
+    Validation combines people and automation. Humans check that the plan's goal matches the issue, the listed paths are
+    within scope, risky steps have a rollback, and success criteria are verifiable. Automation checks the structure: a
+    plan-gate workflow, marked as a required check, fails the pull request when the description is missing mandatory
+    sections.
+  </p>
+
+  <CodeBlock code={planGate} lang="yaml" />
+
+  <Callout type="warn" title="A plan gate validates shape, not quality">
+    <p>
+      A required check can prove that a plan <em>exists</em> and has the right sections; only a reviewer can decide that
+      it is <em>right</em>. Pair the gate with CODEOWNERS routing so the plan for a change to <code>infra/</code> is read
+      by the platform team.
+    </p>
+  </Callout>
+
+  <h3 id="prevent-action">Prevent agent action until the plan is checked and approved</h3>
+  <p>The platform gives you several independent brakes; combine them according to risk:</p>
+  <div class="table-wrap">
+    <table class="tbl t-slate">
+      <thead><tr><th>Brake</th><th>What it stops</th></tr></thead>
+      <tbody>
+        <tr><td>Plan-first session or PR</td><td>Code generation until a human approves the plan</td></tr>
+        <tr><td>Read-only planning agent</td><td>File edits and shell commands during planning</td></tr>
+        <tr><td>Draft pull request</td><td>Copilot cloud agent cannot mark its PR ready for review, approve it or merge it</td></tr>
+        <tr><td>"Approve and run workflows"</td><td>By default, Actions workflows do not run on Copilot's pushes until someone with write access approves</td></tr>
+        <tr><td>Required checks and reviews (ruleset)</td><td>Merging before evidence and approval exist</td></tr>
+        <tr><td>Environment with required reviewers</td><td>The job that applies a plan — and its secrets — until approved</td></tr>
+        <tr><td><code>preToolUse</code> hook</td><td>Specific tool calls, deterministically, at execution time</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <CodeBlock code={approvalGate} lang="yaml" />
+
+  <!-- ================================================================= -->
+  <h2 id="observability-control"><span class="num">1.3</span> Configure observability and control for autonomous agents</h2>
+
+  <h3 id="degree-of-autonomy">Plan and implement the degree of autonomy</h3>
+  <p>
+    Autonomy is not one switch. It is designed per task from the <strong>impact and reversibility</strong> of the
+    action, and expressed by combining PR rules, environments, workflow permissions and tool access.
+  </p>
+
+  <Mermaid code={autonomyLadder} caption="The autonomy ladder. Each step up needs stronger controls around it; most agent work lives on the first two rungs." />
+
+  <div class="table-wrap">
+    <table class="tbl t-orange">
+      <thead><tr><th>Task type</th><th>Example paths</th><th>Risk</th><th>Autonomy design</th></tr></thead>
+      <tbody>
+        <tr><td>Docs, formatting</td><td><code>docs/</code>, <code>*.md</code></td><td>Low</td><td>Auto-merge once required checks (and any configured reviews) pass</td></tr>
+        <tr><td>Code, dependency bumps</td><td><code>src/</code>, lockfiles</td><td>Medium</td><td>PR + required checks + at least one review</td></tr>
+        <tr><td>Infra, workflows</td><td><code>infra/</code>, <code>.github/workflows/</code></td><td>High</td><td>CODEOWNERS review + multiple approvals + stricter ruleset</td></tr>
+        <tr><td>Production, secrets</td><td>Deploy jobs, environment secrets</td><td>Critical</td><td>Environment approval; the agent prepares but cannot execute</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    Teams usually grow autonomy <strong>progressively</strong>: first the agent may only open PRs; then it may auto-merge
+    low-risk PRs after checks; then deploy to staging; and production only ever through an environment approval. Each
+    phase is earned by evidence that the previous one is reliable. The <a href={href('skill-6-guardrails')}>guardrails
+    page</a> covers the risk classification in depth.
+  </p>
+
+  <h3 id="inspectable-artifacts">Produce inspectable artifacts in standard tooling</h3>
+  <p>
+    An agent's work must leave evidence in the tools people already use — not in a separate dashboard nobody checks.
+    Copilot cloud agent does much of this by default:
+  </p>
+  <ul>
+    <li><strong>Session logs</strong> show the agent's reasoning and every tool it used; open them from the Agents tab or the PR timeline.</li>
+    <li>Commits are <strong>authored by Copilot</strong>, with the person who started the task as <strong>co-author</strong>, and are <strong>signed</strong> ("Verified").</li>
+    <li>Every agent commit message <strong>links to the session log</strong>, so a reviewer or auditor can trace why a change was made.</li>
+    <li>The PR description notes <strong>which custom agent</strong> did the work, and Copilot keeps the title and body up to date as it iterates.</li>
+    <li>Blocked network requests are reported as a <strong>firewall warning</strong> in the PR body or a comment.</li>
+    <li>Administrators see <strong>audit log events</strong> filtered by <code>actor:Copilot</code>, each carrying an <code>agent_session_id</code>.</li>
+  </ul>
+  <p>
+    For agents you run in workflows, make the evidence yourself: upload reports with <code>actions/upload-artifact</code>,
+    write a summary to <code>$GITHUB_STEP_SUMMARY</code>, and link the run from the PR's Evidence section.
+  </p>
+
+  <h3 id="human-intervention">Configure human intervention without slowing delivery</h3>
+  <p>
+    Human oversight belongs at <strong>decision points</strong> — merge, deploy, secret access — not at every step.
+    Intervention should be quick, targeted and never require stopping the whole system.
+  </p>
+  <div class="table-wrap">
+    <table class="tbl t-blue">
+      <thead><tr><th>Intervention</th><th>How</th><th>Why it keeps velocity</th></tr></thead>
+      <tbody>
+        <tr><td>Steer a running session</td><td>Type a follow-up in the session's prompt box on the Agents page</td><td>Redirects the agent after its current tool call — no restart</td></tr>
+        <tr><td>Iterate on the PR</td><td>Mention <code>@copilot</code> in a review comment (batch comments with <strong>Start a review</strong>)</td><td>Copilot pushes fixes to the same branch</td></tr>
+        <tr><td>Stop a session</td><td><strong>Stop session</strong> in the log viewer</td><td>Ends the Actions run but keeps commits already pushed</td></tr>
+        <tr><td>Route reviews</td><td>CODEOWNERS</td><td>The right expert sees the change first time</td></tr>
+        <tr><td>Hold low-confidence triage</td><td>Automation level: Full control · Cautious · Balanced · Full automation</td><td>Only uncertain issue changes wait for a person</td></tr>
+        <tr><td>Evidence-first review</td><td>Plan, checks and artifacts in the PR</td><td>Reviewers decide quickly instead of re-deriving the context</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <Callout type="tip" title="Friction is a risk too">
+    <p>
+      Approvals that do not materially reduce risk train reviewers to click "approve" without reading — rubber-stamping.
+      Automate the reversible, low-risk path completely, keep pull requests small, and spend human attention where a
+      mistake would be expensive or irreversible.
+    </p>
+  </Callout>
+</NoteLayout>

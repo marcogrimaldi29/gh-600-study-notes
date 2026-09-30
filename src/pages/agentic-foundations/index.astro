@@ -1,0 +1,440 @@
+---
+import NoteLayout from '../../layouts/NoteLayout.astro';
+import Callout from '../../components/Callout.astro';
+import CodeBlock from '../../components/CodeBlock.astro';
+import Mermaid from '../../components/Mermaid.astro';
+import { href } from '../../lib/urls';
+
+const lifecycle = `
+flowchart TB
+  GOAL["Goal<br/>issue · prompt · alert"] --> PLAN["Plan<br/>scope · steps · success criteria"]
+  PLAN --> ACT["Act<br/>branch · commits · pull request"]
+  ACT --> EVAL["Evaluate<br/>checks · scans · reviews"]
+  EVAL -->|"criteria met"| DONE["Accept<br/>merge or hand off"]
+  EVAL -.->|"same failure twice"| HUMAN["Escalate<br/>to a human"]
+  EVAL -->|"checks fail"| PLAN
+`;
+
+const surfaces = `
+flowchart TB
+  subgraph GH["Runs on GitHub"]
+    direction LR
+    CCA["Copilot cloud agent<br/>Actions-powered sandbox"]
+    AUTO["Automations<br/>scheduled or event-triggered cloud agent"]
+    GHAW["GitHub Agentic Workflows<br/>markdown compiled to Actions"]
+    TPA["Third-party agents<br/>Claude · Codex"]
+  end
+  subgraph LOCAL["Runs on your machine"]
+    direction LR
+    CLI["Copilot CLI<br/>interactive · -p · autopilot"]
+    IDE["Agent mode in the IDE<br/>VS Code · JetBrains · Visual Studio"]
+    SDK["Copilot SDK<br/>your app embeds the agent runtime"]
+  end
+`;
+
+const stack = `
+flowchart TB
+  subgraph ENF["Enforcement — the platform blocks"]
+    subgraph SHAPE["Capability — what it can attempt"]
+      subgraph GUIDE["Guidance — what the agent is told"]
+        INS["Custom instructions<br/>copilot-instructions.md · AGENTS.md"]
+        AGP["Custom agent prompt<br/>.github/agents/*.agent.md"]
+        SKL["Skills<br/>.github/skills/*/SKILL.md"]
+      end
+      TL["Tool allowlists<br/>tools: · --allow-tool · MCP tools"]
+      ENV["Environment<br/>setup steps · firewall · Agents secrets"]
+    end
+    HK["Hooks<br/>preToolUse can deny"]
+    RS["Rulesets · CODEOWNERS<br/>required checks · environments"]
+  end
+  INS ~~~ TL
+  SKL ~~~ ENV
+  TL ~~~ HK
+  ENV ~~~ RS
+`;
+
+const governanceTable = `# .github/pull_request_template.md — gives every agent PR the same reviewable shape
+## Plan (required)
+- **Goal:**
+- **Scope (paths):**
+- **Steps:**
+- **Success criteria:**
+- **Rollback / escalation:**
+
+## Evidence
+- Workflow run:
+- Scan results:`;
+---
+
+<NoteLayout
+  slug="agentic-foundations"
+  description="GH-600 foundations: assistant versus agent, the plan → act → evaluate lifecycle, GitHub as system of record and control plane, the contributor model, accountability, every Copilot agent surface, the customization stack and the renames you will meet."
+  intro="Everything in the six skill areas assumes this mental model. Learn how an agent differs from an assistant, why GitHub is where agent work is both recorded and controlled, which Copilot surfaces run where, and which configuration layer is guidance versus enforcement."
+>
+  <div class="card">
+    <strong>What this page covers:</strong>
+    <ul style="margin-bottom:0">
+      <li><a href="#assistant-vs-agent">Assistant versus agent</a> — what makes a system agentic in a development context</li>
+      <li><a href="#lifecycle">The plan → act → evaluate lifecycle</a> — and why evaluation must use system signals</li>
+      <li><a href="#control-plane">GitHub as system of record and control plane</a> — the controls that supervise agents</li>
+      <li><a href="#accountability">Accountability and the contributor model</a> — who owns outcomes, and how to judge agent work</li>
+      <li><a href="#surfaces">Where Copilot agents run</a> — cloud agent, CLI, IDE, SDK, agentic workflows, automations</li>
+      <li><a href="#customization-stack">The customization stack</a> — instructions, agents, skills, tools, hooks and policy</li>
+      <li><a href="#renames">Renames and naming traps</a> — and a <a href="#glossary">glossary</a></li>
+    </ul>
+  </div>
+
+  <!-- ================================================================= -->
+  <h2 id="assistant-vs-agent">Assistant versus agent</h2>
+
+  <p>
+    Most developers first meet AI in the <strong>assistant</strong> pattern: it responds to a prompt, produces output,
+    and hands control back. An <strong>agent</strong> goes further. It holds a goal across multiple steps, decides the
+    intermediate steps itself, uses tools, and changes durable artifacts — branches, commits, pull requests — iterating
+    on feedback until the task is done. That shift turns AI from something that helps with development into something
+    that <em>participates</em> in it, and participation is what has to be governed.
+  </p>
+
+  <div class="table-wrap">
+    <table class="tbl t-blue">
+      <thead><tr><th>Behaviour</th><th>Assistant</th><th>Agent</th></tr></thead>
+      <tbody>
+        <tr><td>Who decides the next step</td><td>The user, every time</td><td>The agent, within its boundaries</td></tr>
+        <tr><td>Goal persistence</td><td>One prompt, one answer</td><td>Maintains a goal across many steps</td></tr>
+        <tr><td>Tool use</td><td>None, or read-only lookups</td><td>Uses tools: shell, file edits, GitHub API, MCP servers</td></tr>
+        <tr><td>Output</td><td>Suggestions and explanations the user applies</td><td>Durable artifacts: branch, commits, pull request</td></tr>
+        <tr><td>Feedback</td><td>The user re-prompts</td><td>Iterates on checks, scans and review comments</td></tr>
+        <tr><td>Example</td><td>"How do I safely bump this dependency?" → a checklist</td><td>Security alert → branch, dependency bump, PR with plan, revision after CI</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    In GitHub, agent behaviour shows up in exactly the places developers already look: <strong>branches and
+    commits</strong> (what changed), <strong>pull requests</strong> (what is proposed and why),
+    <strong>workflows and checks</strong> (what evidence exists) and <strong>reviews</strong> (what humans accepted).
+    An agent does not replace the workflow — it enters the workflow as a participant.
+  </p>
+
+  <Callout type="exam" title="The distinction the exam tests">
+    <p>
+      A question that describes a tool that <em>suggests</em> code and waits for the developer is describing an
+      assistant; one that describes something that <em>creates a branch, pushes commits and opens a pull request</em> is
+      describing an agent. Governance questions are only about the second kind: an assistant never needs a ruleset
+      bypass, a firewall allowlist or an escalation path.
+    </p>
+  </Callout>
+
+  <!-- ================================================================= -->
+  <h2 id="lifecycle">The plan → act → evaluate lifecycle</h2>
+
+  <p>
+    Agents do not make one decision and stop; they run a loop until the task meets its success criteria or is handed to
+    a person. Each phase has a GitHub-native home, and a well-designed system makes all three phases visible.
+  </p>
+
+  <Mermaid code={lifecycle} caption="The agent loop. Evaluation either accepts the work, feeds another planning round, or escalates to a human after repeated failure." />
+
+  <dl class="terms">
+    <dt>Plan</dt>
+    <dd>
+      The agent interprets the goal and decides the steps. In a good system the plan is a <strong>reviewable
+      artifact</strong> — a plan section in the pull request, a checklist in the issue, a <code>plan.md</code> — not a
+      hidden internal state. Plans become reviewable when they state scope, success criteria, and a rollback or
+      escalation path.
+    </dd>
+    <dt>Act</dt>
+    <dd>
+      The agent executes in the repository: creates a branch, changes files, pushes commits, opens or updates a pull
+      request, responds to review feedback. Execution stays <strong>bounded</strong>: one repository, one branch, through
+      pull requests — never uncontrolled writes to the default branch.
+    </dd>
+    <dt>Evaluate</dt>
+    <dd>
+      The agent and its supervisors judge the result with <strong>system signals</strong>: workflow runs and status
+      checks, review outcomes, code scanning, secret scanning, dependency alerts. With rulesets or branch protection,
+      required checks turn evaluation into an enforceable gate rather than a suggestion.
+    </dd>
+  </dl>
+
+  <Callout type="tip" title="Evaluation is grounded in signals, not in the agent's confidence">
+    <p>
+      "The agent says it fixed the vulnerability" is not evidence. "The dependency alert closed, CodeQL is clean and the
+      required checks passed" is. If checks fail or risk remains, the loop continues: revise the plan, adjust the change,
+      re-evaluate — or escalate.
+    </p>
+  </Callout>
+
+  <!-- ================================================================= -->
+  <h2 id="control-plane">GitHub as system of record and control plane</h2>
+
+  <p>
+    The course's central idea is that GitHub plays two roles at once. As the <strong>system of record</strong> it stores
+    every artifact through which work is proposed and judged — repositories, branches, commits, pull requests, issues,
+    discussions, workflow runs, uploaded artifacts and review history — so agent behaviour can be inspected after the
+    fact. As the <strong>control plane</strong> it provides the enforcement points that decide what an agent's
+    contribution can and cannot do.
+  </p>
+
+  <div class="table-wrap">
+    <table class="tbl t-violet">
+      <thead><tr><th>GitHub control</th><th>What it enforces</th><th>Why it matters for agents</th></tr></thead>
+      <tbody>
+        <tr><td>Pull requests</td><td>Changes are proposed before merging</td><td>Makes agent work reviewable and discussable</td></tr>
+        <tr><td>Required reviews</td><td>An approval gate</td><td>Prevents unreviewed merges and anchors accountability to a person</td></tr>
+        <tr><td>Required status checks</td><td>CI evidence before merge</td><td>Turns evaluation into enforceable policy</td></tr>
+        <tr><td>CODEOWNERS</td><td>Review routing by path</td><td>The right experts see high-impact changes — enforced only with "require review from Code Owners"</td></tr>
+        <tr><td>Rulesets / branch protection</td><td>Central branch policy</td><td>Blocks direct pushes, force pushes and merges that skip gates</td></tr>
+        <tr><td>Environments</td><td>Required reviewers, wait timers, scoped secrets</td><td>Deployments and secret access pause for a human</td></tr>
+        <tr><td>Workflow permissions</td><td>What <code>GITHUB_TOKEN</code> can do</td><td>"What the agent can do" often reduces to "what its token can do"</td></tr>
+        <tr><td>Audit log</td><td>Who did what, when</td><td>Agentic events carry <code>actor:Copilot</code> and an agent session ID</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <Callout type="warn" title="Supervision works everywhere; enforcement needs configuration">
+    <p>
+      Reviewing an agent's pull request is always possible. <em>Blocking</em> an unsafe merge only happens when someone
+      with admin rights has turned the control on: a ruleset that requires the check, a CODEOWNERS rule that is actually
+      required, an environment with required reviewers. A control that exists only in a document is not a control.
+    </p>
+  </Callout>
+
+  <p>A typical agent pull request moves through the control plane like this:</p>
+  <ol class="steps" style="--accent:var(--s0)">
+    <li>The agent opens a pull request with its change and plan, making the work visible.</li>
+    <li>CODEOWNERS requests review from the owners of every sensitive path it touched.</li>
+    <li>Required workflows and scans run and report status checks.</li>
+    <li>The ruleset blocks merge until checks pass and approvals are in.</li>
+    <li>If the change deploys, an environment with required reviewers pauses the deploy job — and its secrets — until someone approves.</li>
+  </ol>
+
+  <CodeBlock code={governanceTable} lang="markdown" label="PR template" />
+
+  <!-- ================================================================= -->
+  <h2 id="accountability">Accountability and the contributor model</h2>
+
+  <h3 id="responsibility">Responsibility does not move with execution</h3>
+  <p>
+    An agent can create a pull request, revise code and answer feedback, but it does not own the outcome. The people and
+    teams who <strong>defined the task, set the permissions, chose the controls and approved the change</strong> remain
+    accountable. GitHub encodes this: Copilot cloud agent's commits are authored by Copilot with the person who assigned
+    the task as co-author, and that person cannot approve the resulting pull request.
+  </p>
+
+  <div class="table-wrap">
+    <table class="tbl t-red">
+      <thead><tr><th>Anti-pattern</th><th>What it looks like</th><th>GitHub mitigation</th></tr></thead>
+      <tbody>
+        <tr><td>Planless execution</td><td>A diff with no plan or rationale</td><td>PR template with a required plan section; review before merge; plan-first workflow for risky work</td></tr>
+        <tr><td>Over-permissioned agent</td><td>Workflows can write everywhere and read every secret</td><td>Least-privilege <code>GITHUB_TOKEN</code>; environment-scoped secrets; tool allowlists</td></tr>
+        <tr><td>Hidden reasoning</td><td>Only the output diff, no assumptions or decisions</td><td>Plan artifact, linked workflow runs, decisions recorded in the PR</td></tr>
+        <tr><td>Blind trust in automation</td><td>"CI passed, ship it"</td><td>Checks plus CODEOWNERS plus risk-based approvals — checks only validate what they were written to detect</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="audit-trail">The minimum audit trail</h3>
+  <p>For every agent contribution you should be able to reconstruct:</p>
+  <ul>
+    <li>A <strong>stated goal</strong> — the issue link or PR description.</li>
+    <li>An <strong>inspectable plan</strong> — plan section or file.</li>
+    <li>A <strong>bounded changeset</strong> — one branch, scoped commits.</li>
+    <li><strong>Automated evidence</strong> — workflow runs and uploaded artifacts.</li>
+    <li><strong>Human judgement</strong> — reviews and approvals.</li>
+    <li>A <strong>clear outcome</strong> — merge, revert, or escalation.</li>
+  </ul>
+
+  <h3 id="contributor-model">The contributor model</h3>
+  <p>
+    The most reliable way to judge agent output is to stop treating it as categorically different: <strong>treat it as a
+    contribution</strong>. A pull request answers the same questions whoever wrote it. The model avoids two opposite
+    errors — <em>excessive suspicion</em> (rejecting work because an AI wrote it) and <em>excessive trust</em> (accepting
+    it because automation produced it).
+  </p>
+
+  <div class="table-wrap">
+    <table class="tbl t-green">
+      <thead><tr><th>Rubric item</th><th>Question for an agent pull request</th></tr></thead>
+      <tbody>
+        <tr><td>Intent</td><td>Is there a clear goal and a visible plan?</td></tr>
+        <tr><td>Scope</td><td>Do the changed files match the plan?</td></tr>
+        <tr><td>Evidence</td><td>Do required checks pass? Are logs and artifacts available?</td></tr>
+        <tr><td>Ownership</td><td>Did the code owners of sensitive paths review it?</td></tr>
+        <tr><td>Policy</td><td>Does it comply with rulesets, branch rules and environments?</td></tr>
+        <tr><td>Fallback</td><td>Is rollback or escalation clear for a high-risk change?</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    A well-supervised agent contribution is <strong>understandable, bounded, reviewable, policy-compliant and
+    reconstructable</strong>. That is not a special standard for AI — it is the standard of a healthy engineering
+    workflow, applied consistently.
+  </p>
+
+  <!-- ================================================================= -->
+  <h2 id="surfaces">Where Copilot agents run</h2>
+
+  <p>
+    "The agent" in an exam question can mean several different products, and each has a different execution context,
+    trigger and governance boundary. Placing the scenario on the right surface is often half the answer.
+  </p>
+
+  <Mermaid code={surfaces} caption="Agent surfaces split by where they execute. The ones on GitHub are governed by repository and organization policy; the local ones by the developer's permissions and enterprise-managed settings." />
+
+  <div class="table-wrap">
+    <table class="tbl t-violet">
+      <thead><tr><th>Surface</th><th>Where it runs</th><th>How it is triggered</th><th>Key boundaries</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>Copilot cloud agent</td>
+          <td>Ephemeral GitHub Actions environment</td>
+          <td>Agents tab or panel, assigning an issue to Copilot, <code>@copilot</code> on a PR, Copilot Chat, CLI <code>/delegate</code>, the REST API, Slack, Teams, Jira, Linear, Azure Boards</td>
+          <td>One repository, one <code>copilot/</code> branch, draft PR, firewall, 59-minute session, workflows need approval to run</td>
+        </tr>
+        <tr>
+          <td>Automations</td>
+          <td>Cloud agent sessions</td>
+          <td>Schedule, issue created, PR opened or synchronized</td>
+          <td>Private or internal repositories only; tools chosen per automation; ignores untrusted users by default</td>
+        </tr>
+        <tr>
+          <td>GitHub Agentic Workflows</td>
+          <td>GitHub Actions, containerized and firewalled</td>
+          <td>Any Actions trigger; <code>gh aw run</code></td>
+          <td>Markdown compiled to <code>.lock.yml</code>; read-only token by default; writes only through <code>safe-outputs</code></td>
+        </tr>
+        <tr>
+          <td>Third-party agents</td>
+          <td>Same infrastructure as cloud agent</td>
+          <td>Agents tab, issue assignment, <code>@AGENT_NAME</code> on a PR</td>
+          <td>Same protections as cloud agent; policies managed separately; no steering</td>
+        </tr>
+        <tr>
+          <td>Copilot CLI</td>
+          <td>Your terminal — or a runner, when used in a workflow</td>
+          <td>Interactive, <code>-p</code> programmatic, autopilot, <code>/fleet</code></td>
+          <td>Your user's permissions; tool approval prompts; <code>--allow-tool</code> / <code>--deny-tool</code>; local hooks and managed settings</td>
+        </tr>
+        <tr>
+          <td>Agent mode in the IDE</td>
+          <td>Your local workspace</td>
+          <td>Chat in agent mode</td>
+          <td>Edits your working tree directly; governed by IDE settings, not by GitHub agent policies</td>
+        </tr>
+        <tr>
+          <td>Copilot SDK</td>
+          <td>Inside your own application</td>
+          <td>Your code creates sessions</td>
+          <td>You define custom agents, tool lists, permission handlers and hooks programmatically</td>
+        </tr>
+        <tr>
+          <td>Copilot code review</td>
+          <td>Ephemeral Actions environment</td>
+          <td>Reviewer request on a PR, or automatically</td>
+          <td>Comments only; uses repository instructions and read-only MCP tools</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <Callout type="exam" title="Cloud agent is not agent mode">
+    <p>
+      <strong>Copilot cloud agent</strong> works autonomously in a GitHub Actions-powered environment and delivers its
+      work on a branch and (optionally) a pull request. <strong>Agent mode</strong> edits files directly in your local
+      IDE workspace. A question about repository rulesets, the agent firewall or "Approve and run workflows" is about
+      cloud agent; a question about edits appearing in your open editor is about agent mode.
+    </p>
+  </Callout>
+
+  <!-- ================================================================= -->
+  <h2 id="customization-stack">The customization stack</h2>
+
+  <p>
+    Copilot's behaviour is shaped by several layers, each stored in a predictable place. The layers differ in one way
+    that matters more than any other on this exam: whether they <strong>guide</strong> the model or
+    <strong>enforce</strong> a boundary.
+  </p>
+
+  <Mermaid code={stack} caption="Guidance is wrapped by capability limits, which are wrapped by enforcement. The further out a control sits, the less it depends on the model choosing to comply." />
+
+  <div class="table-wrap">
+    <table class="tbl t-slate">
+      <thead><tr><th>Layer</th><th>Where it lives</th><th>Triggered</th><th>Guidance or enforcement</th></tr></thead>
+      <tbody>
+        <tr><td>Repository instructions</td><td><code>.github/copilot-instructions.md</code></td><td>Automatic, every request</td><td>Guidance</td></tr>
+        <tr><td>Path-specific instructions</td><td><code>.github/instructions/**/*.instructions.md</code> with <code>applyTo</code></td><td>Automatic, for matching files</td><td>Guidance</td></tr>
+        <tr><td>Agent instructions</td><td><code>AGENTS.md</code> (nearest wins), or root <code>CLAUDE.md</code> / <code>GEMINI.md</code></td><td>Automatic</td><td>Guidance</td></tr>
+        <tr><td>Prompt files</td><td><code>.github/prompts/*.prompt.md</code></td><td>Manual (IDE)</td><td>Guidance</td></tr>
+        <tr><td>Custom agents</td><td><code>.github/agents/NAME.agent.md</code>; org or enterprise <code>agents/</code></td><td>Selected, or inferred</td><td>Prompt is guidance; <code>tools</code> list is a capability limit</td></tr>
+        <tr><td>Agent skills</td><td><code>.github/skills/NAME/SKILL.md</code> (+ scripts)</td><td>Loaded when relevant</td><td>Guidance (plus bundled scripts)</td></tr>
+        <tr><td>MCP servers</td><td>Repository settings JSON, <code>mcp-servers</code> in a profile, <code>mcp.json</code></td><td>Tool calls</td><td>Capability — the <code>tools</code> field allowlists</td></tr>
+        <tr><td>Setup steps</td><td><code>.github/workflows/copilot-setup-steps.yml</code></td><td>Before each cloud agent session</td><td>Environment</td></tr>
+        <tr><td>Hooks</td><td><code>.github/hooks/*.json</code></td><td>Lifecycle events</td><td>Enforcement — <code>preToolUse</code> can deny</td></tr>
+        <tr><td>Copilot Memory</td><td>Stored by GitHub, per repository and per user</td><td>Automatic, validated before use</td><td>Guidance</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <Callout type="tip" title="Rule of thumb">
+    <p>
+      "Tell the agent not to do X" belongs in instructions. "Make it impossible for the agent to do X" belongs in a tool
+      allowlist, a hook, the firewall, a token permission or a ruleset. When a question asks how to <em>prevent</em>
+      something, the answer is almost never an instruction file. The
+      <a href={href('config-reference')}>Configuration reference</a> has the syntax of every file above.
+    </p>
+  </Callout>
+
+  <!-- ================================================================= -->
+  <h2 id="renames">Renames and naming traps</h2>
+
+  <p>
+    The GitHub agent platform moved fast during 2025–2026. The exam and the live documentation use the current names,
+    but Learn modules, blog posts and third-party material still carry older ones.
+  </p>
+
+  <div class="table-wrap">
+    <table class="tbl t-magenta">
+      <thead><tr><th>You may read</th><th>Current name</th><th>Note</th></tr></thead>
+      <tbody>
+        <tr><td>Copilot coding agent</td><td><strong>Copilot cloud agent</strong></td><td>Renamed April 2026, when it gained research and planning before a PR. Some REST endpoints and metrics fields still say "coding agent".</td></tr>
+        <tr><td><code>copilot</code> environment secrets (Actions)</td><td><strong>Agents secrets and variables</strong></td><td>Dedicated secret type at organization and repository level; existing values were migrated automatically.</td></tr>
+        <tr><td><code>infer: false</code> in an agent profile</td><td><strong><code>disable-model-invocation: true</code></strong></td><td><code>infer</code> is retired; <code>user-invocable</code> controls manual selection separately.</td></tr>
+        <tr><td>Premium requests</td><td><strong>AI credits</strong></td><td>Cloud agent, CLI and agentic workflows consume AI credits (and Actions minutes where they run on runners).</td></tr>
+        <tr><td>Copilot Extensions (GitHub App based)</td><td><strong>MCP servers</strong></td><td>Sunset on November 10, 2025 in favour of MCP; integrations are now built as MCP servers, custom agents and skills.</td></tr>
+        <tr><td><code>gh copilot</code> CLI extension</td><td><strong>GitHub Copilot CLI</strong> (<code>copilot</code>)</td><td>The old <code>gh</code> extension was deprecated; the agentic CLI is installed from the <code>@github/copilot</code> npm package.</td></tr>
+        <tr><td>Copilot cloud agent "firewall" in Actions variables</td><td><strong>Settings → Copilot → Internet access</strong></td><td>Earlier configuration saved as Actions variables is preserved on the new page.</td></tr>
+        <tr><td>MCP settings under cloud agent</td><td><strong>Settings → Copilot → MCP servers</strong></td><td>Shared by cloud agent and Copilot code review.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <Callout type="rename" title="When the question and the docs disagree on a name">
+    <p>
+      Answer with the product behaviour, not the label. "Coding agent" and "cloud agent" describe the same asynchronous
+      agent that works on a branch in GitHub Actions; the rename changed capabilities (branch-first work before a PR), not
+      the security model.
+    </p>
+  </Callout>
+
+  <h3 id="glossary">Glossary</h3>
+  <dl class="terms">
+    <dt>Agent profile</dt>
+    <dd>A Markdown file with YAML frontmatter (<code>name</code>, <code>description</code>, <code>tools</code>, <code>mcp-servers</code>…) that defines a custom agent.</dd>
+    <dt>Agent session</dt>
+    <dd>One interaction with an agent on a task — the unit you monitor, steer, stop, archive and audit.</dd>
+    <dt>Control plane</dt>
+    <dd>The set of GitHub enforcement points — rulesets, checks, CODEOWNERS, environments, permissions — that decide what agent work is accepted.</dd>
+    <dt>Execution context</dt>
+    <dd>Repository, branch, workflow and permissions an agent runs under. It determines both what it can see and what it can do.</dd>
+    <dt>MCP (Model Context Protocol)</dt>
+    <dd>An open standard for connecting AI clients to tools through MCP servers. Registries catalogue servers; allowlists decide which may run.</dd>
+    <dt>Safe outputs</dt>
+    <dd>In GitHub Agentic Workflows, the declared set of write operations (create issue, add comment, open PR) that a separate, gated job may perform on the agent's behalf.</dd>
+    <dt>Subagent</dt>
+    <dd>An agent spawned by a main agent to handle a subtask in its own context window, optionally in parallel.</dd>
+    <dt>System of record</dt>
+    <dd>The durable store of intent, action and evidence — for agent work, GitHub issues, PRs, commits, runs and reviews.</dd>
+  </dl>
+</NoteLayout>
