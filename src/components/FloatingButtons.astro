@@ -12,6 +12,10 @@ import ThemeToggle from './ThemeToggle.astro';
  * Left — the theme switcher, which stays visible at all times: it is not tied
  * to reading position, and keeping it out of the top bar is what leaves room
  * for the full wordmark on a phone.
+ *
+ * Each control's aria-label doubles as its GitHub-style tooltip (see the
+ * "Floating buttons" block in global.css), so there is no title attribute to
+ * show a second, native one.
  */
 
 interface Props {
@@ -26,13 +30,13 @@ const { isHome = false } = Astro.props;
 
 {
   !isHome && (
-    <a class="icon-btn float-btn float-home" href={href('')} aria-label="Back to the home page" title="Home">
+    <a class="float-btn float-home" href={href('')} aria-label="Back to the home page">
       <Octicon name="home" />
     </a>
   )
 }
 
-<button type="button" class="icon-btn float-btn float-top" id="back-to-top" aria-label="Back to top" title="Back to top">
+<button type="button" class="float-btn float-top" id="back-to-top" aria-label="Back to top">
   <Octicon name="arrow-up" />
 </button>
 
