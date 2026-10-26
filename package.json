@@ -17,6 +17,6 @@
   "dependencies": {
     "@primer/octicons": "^19.38.0",
     "astro": "^7.3.5",
-    "mermaid": "^11.17.2"
+    "mermaid": "^12.2.0"
   }
 }
