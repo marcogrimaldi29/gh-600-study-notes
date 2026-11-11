@@ -45,7 +45,9 @@ against the [official documentation](https://docs.github.com/en/copilot).
 ## 🐞 Spotted a Mistake?
 
 GitHub Copilot ships changes weekly and renames features often, so if something here is wrong or out of date, please
-[report an issue](https://github.com/marcogrimaldi29/gh-600-study-notes/issues).
+[report an issue](https://github.com/marcogrimaldi29/gh-600-study-notes/issues). The
+[contributing guide](.github/CONTRIBUTING.md) covers what to check first, what makes a report quick to fix and what's
+out of scope.
 
 ## ⚠️ Disclaimer
 
